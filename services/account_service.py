@@ -52,6 +52,16 @@ class AccountService:
         return -1
 
     @staticmethod
+    def _build_account_id(access_token: str) -> str:
+        return hashlib.sha1(access_token.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _build_token_preview(access_token: str) -> str:
+        if len(access_token) <= 18:
+            return access_token
+        return f"{access_token[:16]}...{access_token[-8:]}"
+
+    @staticmethod
     def _is_image_account_available(account: dict) -> bool:
         if not isinstance(account, dict):
             return False
@@ -196,30 +206,52 @@ class AccountService:
             headers["oai-session-id"] = session_id
         return headers, impersonate
 
+    def _public_item(self, account: dict) -> dict | None:
+        access_token = self._clean_token(account.get("access_token"))
+        if not access_token:
+            return None
+        return {
+            "id": self._build_account_id(access_token),
+            "token_preview": self._build_token_preview(access_token),
+            "type": account.get("type") or "Free",
+            "status": account.get("status") or "正常",
+            "quota": account.get("quota") if account.get("quota") is not None else 0,
+            "email": account.get("email"),
+            "user_id": account.get("user_id"),
+            "limits_progress": account.get("limits_progress") or [],
+            "default_model_slug": account.get("default_model_slug"),
+            "restoreAt": account.get("restore_at"),
+            "success": int(account.get("success") or 0),
+            "fail": int(account.get("fail") or 0),
+            "lastUsedAt": account.get("last_used_at"),
+        }
+
+    def _public_error(self, access_token: str, message: str) -> dict[str, str]:
+        return {
+            "account_id": self._build_account_id(access_token),
+            "token_preview": self._build_token_preview(access_token),
+            "error": message,
+        }
+
     def _public_items(self, accounts: list[dict]) -> list[dict]:
-        return [
-            {
-                "id": hashlib.sha1(access_token.encode("utf-8")).hexdigest()[:16],
-                "access_token": access_token,
-                "type": account.get("type") or "Free",
-                "status": account.get("status") or "正常",
-                "quota": account.get("quota") if account.get("quota") is not None else 0,
-                "email": account.get("email"),
-                "user_id": account.get("user_id"),
-                "limits_progress": account.get("limits_progress") or [],
-                "default_model_slug": account.get("default_model_slug"),
-                "restoreAt": account.get("restore_at"),
-                "success": int(account.get("success") or 0),
-                "fail": int(account.get("fail") or 0),
-                "lastUsedAt": account.get("last_used_at"),
-            }
-            for account in accounts
-            if (access_token := self._clean_token(account.get("access_token")))
-        ]
+        return [public_item for account in accounts if (public_item := self._public_item(account)) is not None]
 
     def list_tokens(self) -> list[str]:
         with self._lock:
             return [token for item in self._accounts if (token := self._clean_token(item.get("access_token")))]
+
+    def list_tokens_by_ids(self, account_ids: list[str]) -> list[str]:
+        normalized_ids = [self._clean_token(account_id) for account_id in account_ids if self._clean_token(account_id)]
+        if not normalized_ids:
+            return []
+        ordered_ids = dict.fromkeys(normalized_ids)
+        with self._lock:
+            id_to_token = {
+                self._build_account_id(token): token
+                for item in self._accounts
+                if (token := self._clean_token(item.get("access_token")))
+            }
+        return [token for account_id in ordered_ids if (token := id_to_token.get(account_id))]
 
     def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
         excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
@@ -282,6 +314,17 @@ class AccountService:
             index = self._find_account_index(access_token)
             if index >= 0:
                 return dict(self._accounts[index])
+        return None
+
+    def get_public_account_by_id(self, account_id: str) -> dict | None:
+        normalized_id = self._clean_token(account_id)
+        if not normalized_id:
+            return None
+        with self._lock:
+            for item in self._accounts:
+                token = self._clean_token(item.get("access_token"))
+                if token and self._build_account_id(token) == normalized_id:
+                    return self._public_item(item)
         return None
 
     def list_accounts(self) -> list[dict]:
@@ -347,6 +390,9 @@ class AccountService:
     def remove_token(self, access_token: str) -> bool:
         return bool(self.delete_accounts([access_token])["removed"])
 
+    def delete_accounts_by_ids(self, account_ids: list[str]) -> dict:
+        return self.delete_accounts(self.list_tokens_by_ids(account_ids))
+
     def update_account(self, access_token: str, updates: dict) -> dict | None:
         access_token = self._clean_token(access_token)
         if not access_token:
@@ -362,6 +408,15 @@ class AccountService:
             self._save_accounts()
             return dict(account)
         return None
+
+    def update_account_by_id(self, account_id: str, updates: dict) -> dict | None:
+        tokens = self.list_tokens_by_ids([account_id])
+        if not tokens:
+            return None
+        account = self.update_account(tokens[0], updates)
+        if account is None:
+            return None
+        return self._public_item(account)
 
     def mark_image_result(self, access_token: str, success: bool) -> dict | None:
         access_token = self._clean_token(access_token)
@@ -491,7 +546,7 @@ class AccountService:
                             },
                         )
                         message = "检测到封号"
-                    errors.append({"access_token": access_token, "error": message})
+                    errors.append(self._public_error(access_token, message))
 
         print(f"[account-refresh] done refreshed={refreshed} errors={len(errors)} workers={max_workers}")
         return {
@@ -499,6 +554,9 @@ class AccountService:
             "errors": errors,
             "items": self.list_accounts(),
         }
+
+    def refresh_accounts_by_ids(self, account_ids: list[str]) -> dict[str, Any]:
+        return self.refresh_accounts(self.list_tokens_by_ids(account_ids))
 
 
 account_service = AccountService(config.accounts_file)

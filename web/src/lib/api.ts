@@ -27,7 +27,7 @@ export type ApiImageHistoryRecord = {
 
 export type Account = {
   id: string;
-  access_token: string;
+  token_preview: string;
   type: AccountType;
   status: AccountStatus;
   quota: number;
@@ -55,13 +55,13 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
-  errors?: Array<{ access_token: string; error: string }>;
+  errors?: Array<{ account_id: string; token_preview: string; error: string }>;
 };
 
 type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
-  errors: Array<{ access_token: string; error: string }>;
+  errors: Array<{ account_id: string; token_preview: string; error: string }>;
 };
 
 type AccountUpdateResponse = {
@@ -96,22 +96,22 @@ export async function createAccounts(tokens: string[]) {
   });
 }
 
-export async function deleteAccounts(tokens: string[]) {
+export async function deleteAccounts(accountIds: string[]) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
-    body: { tokens },
+    body: { account_ids: accountIds },
   });
 }
 
-export async function refreshAccounts(accessTokens: string[]) {
+export async function refreshAccounts(accountIds: string[]) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
-    body: { access_tokens: accessTokens },
+    body: { account_ids: accountIds },
   });
 }
 
 export async function updateAccount(
-  accessToken: string,
+  accountId: string,
   updates: {
     type?: AccountType;
     status?: AccountStatus;
@@ -121,7 +121,7 @@ export async function updateAccount(
   return httpRequest<AccountUpdateResponse>("/api/accounts/update", {
     method: "POST",
     body: {
-      access_token: accessToken,
+      account_id: accountId,
       ...updates,
     },
   });

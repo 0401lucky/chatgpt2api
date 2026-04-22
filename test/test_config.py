@@ -58,6 +58,35 @@ class ConfigLoadingTests(unittest.TestCase):
                 else:
                     module.os.environ["CHATGPT2API_AUTH_KEY"] = old_env_auth_key
 
+    def test_load_settings_rejects_placeholder_auth_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base_dir = Path(tmp_dir)
+            data_dir = base_dir / "data"
+            config_file = base_dir / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "your_real_auth_key"}), encoding="utf-8")
+
+            module = self.config_module
+            old_base_dir = module.BASE_DIR
+            old_data_dir = module.DATA_DIR
+            old_config_file = module.CONFIG_FILE
+            old_env_auth_key = module.os.environ.get("CHATGPT2API_AUTH_KEY")
+            try:
+                module.BASE_DIR = base_dir
+                module.DATA_DIR = data_dir
+                module.CONFIG_FILE = config_file
+                module.os.environ.pop("CHATGPT2API_AUTH_KEY", None)
+
+                with self.assertRaises(ValueError):
+                    module._load_settings()
+            finally:
+                module.BASE_DIR = old_base_dir
+                module.DATA_DIR = old_data_dir
+                module.CONFIG_FILE = old_config_file
+                if old_env_auth_key is None:
+                    module.os.environ.pop("CHATGPT2API_AUTH_KEY", None)
+                else:
+                    module.os.environ["CHATGPT2API_AUTH_KEY"] = old_env_auth_key
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,15 +36,15 @@ class AccountCreateRequest(BaseModel):
 
 
 class AccountDeleteRequest(BaseModel):
-    tokens: list[str] = Field(default_factory=list)
+    account_ids: list[str] = Field(default_factory=list)
 
 
 class AccountRefreshRequest(BaseModel):
-    access_tokens: list[str] = Field(default_factory=list)
+    account_ids: list[str] = Field(default_factory=list)
 
 
 class AccountUpdateRequest(BaseModel):
-    access_token: str = Field(default="")
+    account_id: str = Field(default="")
     type: str | None = None
     status: str | None = None
     quota: int | None = None
@@ -233,27 +233,32 @@ def create_app() -> FastAPI:
     @router.delete("/api/accounts")
     async def delete_accounts(body: AccountDeleteRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
-        tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
-        if not tokens:
-            raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        return account_service.delete_accounts(tokens)
+        account_ids = [str(account_id or "").strip() for account_id in body.account_ids if str(account_id or "").strip()]
+        if not account_ids:
+            raise HTTPException(status_code=400, detail={"error": "account_ids is required"})
+        if not account_service.list_tokens_by_ids(account_ids):
+            raise HTTPException(status_code=404, detail={"error": "accounts not found"})
+        return account_service.delete_accounts_by_ids(account_ids)
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
-        access_tokens = [str(token or "").strip() for token in body.access_tokens if str(token or "").strip()]
-        if not access_tokens:
+        account_ids = [str(account_id or "").strip() for account_id in body.account_ids if str(account_id or "").strip()]
+        if not account_ids:
             access_tokens = account_service.list_tokens()
-        if not access_tokens:
-            raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
-        return account_service.refresh_accounts(access_tokens)
+            if not access_tokens:
+                raise HTTPException(status_code=400, detail={"error": "account_ids is required"})
+            return account_service.refresh_accounts(access_tokens)
+        if not account_service.list_tokens_by_ids(account_ids):
+            raise HTTPException(status_code=404, detail={"error": "accounts not found"})
+        return account_service.refresh_accounts_by_ids(account_ids)
 
     @router.post("/api/accounts/update")
     async def update_account(body: AccountUpdateRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
-        access_token = str(body.access_token or "").strip()
-        if not access_token:
-            raise HTTPException(status_code=400, detail={"error": "access_token is required"})
+        account_id = str(body.account_id or "").strip()
+        if not account_id:
+            raise HTTPException(status_code=400, detail={"error": "account_id is required"})
 
         updates = {
             key: value
@@ -267,7 +272,7 @@ def create_app() -> FastAPI:
         if not updates:
             raise HTTPException(status_code=400, detail={"error": "no updates provided"})
 
-        account = account_service.update_account(access_token, updates)
+        account = account_service.update_account_by_id(account_id, updates)
         if account is None:
             raise HTTPException(status_code=404, detail={"error": "account not found"})
         return {"item": account, "items": account_service.list_accounts()}

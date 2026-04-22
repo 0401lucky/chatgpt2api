@@ -6,8 +6,8 @@ FROM --platform=$BUILDPLATFORM node:22-alpine AS web-build
 
 WORKDIR /app/web
 
-COPY web/package.json web/bun.lock ./
-RUN npm install
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
 
 COPY VERSION /app/VERSION
 COPY web ./
@@ -31,7 +31,6 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY main.py ./
-COPY config.json ./
 COPY VERSION ./
 COPY services ./services
 COPY --from=web-build /app/web/out ./web_dist

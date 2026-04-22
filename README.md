@@ -23,10 +23,16 @@
 
 ```bash
 git clone git@github.com:basketikun/chatgpt2api.git
-# 按需编辑 config.json 的密钥和 `refresh_account_interval_minute`
-# 也可以直接通过环境变量 CHATGPT2API_AUTH_KEY 覆盖 auth-key
+# 仓库里的 config.json 只是占位示例，必须改成你自己的密钥
+# 或者导出环境变量 CHATGPT2API_AUTH_KEY 后再启动
 docker compose up -d
 ```
+
+说明：
+
+- `config.json` 中的 `your_real_auth_key` 是占位值，不会被程序接受
+- `docker-compose.yml` 会把宿主机的 `CHATGPT2API_AUTH_KEY` 透传进容器
+- 如果你不想在本地文件里写密钥，可以先执行 `export CHATGPT2API_AUTH_KEY=你的密钥` 再运行 `docker compose up -d`
 
 ## 功能
 
@@ -53,7 +59,7 @@ docker compose up -d
 - 轮询可用账号执行图片生成与图片编辑
 - 遇到 Token 失效类错误时自动剔除无效 Token
 - 定时检查限流账号并自动刷新
-- 支持搜索、筛选、批量刷新、导出、手动编辑和清理账号
+- 支持搜索、筛选、批量刷新、手动编辑和清理账号
 - 支持三种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`access_token` 导入
 
 ### 实验性 / 规划中

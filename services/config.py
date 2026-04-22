@@ -9,6 +9,11 @@ from typing import cast
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
+PLACEHOLDER_AUTH_KEYS = {
+    "your_real_auth_key",
+    "replace-me",
+    "chatgpt2api",
+}
 
 
 @dataclass(frozen=True)
@@ -53,11 +58,12 @@ def _load_settings() -> AppSettings:
     if config_file is not None:
         raw_config.update(_load_json_object(config_file, name="config.json"))
 
-    auth_key = str(
+    raw_auth_key = str(
         os.getenv("CHATGPT2API_AUTH_KEY")
         or raw_config.get("auth-key")
         or ""
     ).strip()
+    auth_key = "" if raw_auth_key.lower() in PLACEHOLDER_AUTH_KEYS else raw_auth_key
 
     if not auth_key:
         raise ValueError(
@@ -66,7 +72,8 @@ def _load_settings() -> AppSettings:
             "1. 在 Render 的 Environment 变量中添加：\n"
             "   CHATGPT2API_AUTH_KEY = your_real_auth_key\n"
             "2. 或者在 config.json 中填写：\n"
-            '   "auth-key": "your_real_auth_key"'
+            '   "auth-key": "your_real_auth_key"\n'
+            "注意：占位值 your_real_auth_key / replace-me / chatgpt2api 不会被接受。"
         )
 
     refresh_account_interval_minute = cast(

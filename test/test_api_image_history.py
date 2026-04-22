@@ -83,6 +83,114 @@ class ImageHistoryApiTests(unittest.TestCase):
         self.assertTrue(image_response.content)
         self.assertEqual(missing_response.status_code, 404)
 
+    def test_image_history_delete_requires_authentication(self) -> None:
+        with patch.object(api_module, "image_history_service", self.history_service), patch.object(
+            api_module,
+            "start_limited_account_watcher",
+            return_value=_FakeThread(),
+        ):
+            with TestClient(api_module.create_app()) as client:
+                response = client.post(
+                    "/api/image-history/delete",
+                    json={"items": [{"record_id": "any", "image_ids": ["any"]}]},
+                )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_image_history_delete_multiple_images_across_records(self) -> None:
+        record_a = self.history_service.save_record(
+            source_endpoint="/v1/images/generations",
+            mode="generate",
+            model="gpt-image-1",
+            prompt="record_a",
+            image_items=[{"b64_json": PNG_B64, "revised_prompt": "record_a"} for _ in range(2)],
+            usage={"input_tokens": 5, "output_tokens": 1056, "total_tokens": 1061},
+        )
+        record_b = self.history_service.save_record(
+            source_endpoint="/v1/images/generations",
+            mode="generate",
+            model="gpt-image-1",
+            prompt="record_b",
+            image_items=[{"b64_json": PNG_B64, "revised_prompt": "record_b"} for _ in range(2)],
+            usage={"input_tokens": 5, "output_tokens": 1056, "total_tokens": 1061},
+        )
+        headers = {"Authorization": f"Bearer {api_module.config.auth_key}"}
+
+        with patch.object(api_module, "image_history_service", self.history_service), patch.object(
+            api_module,
+            "start_limited_account_watcher",
+            return_value=_FakeThread(),
+        ):
+            with TestClient(api_module.create_app()) as client:
+                response = client.post(
+                    "/api/image-history/delete",
+                    headers=headers,
+                    json={
+                        "items": [
+                            {"record_id": record_a["id"], "image_ids": [record_a["images"][0]["id"]]},
+                            {"record_id": record_b["id"], "image_ids": [record_b["images"][0]["id"]]},
+                        ]
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["deleted_images"], 2)
+        self.assertEqual(payload["deleted_records"], 0)
+        returned_records = {item["id"]: item for item in payload["items"]}
+        self.assertIn(record_a["id"], returned_records)
+        self.assertIn(record_b["id"], returned_records)
+        self.assertEqual(len(returned_records[record_a["id"]]["images"]), 1)
+        self.assertEqual(len(returned_records[record_b["id"]]["images"]), 1)
+
+    def test_image_history_delete_last_image_removes_record_from_items(self) -> None:
+        record = self.history_service.save_record(
+            source_endpoint="/v1/images/generations",
+            mode="generate",
+            model="gpt-image-1",
+            prompt="single_image_record",
+            image_items=[{"b64_json": PNG_B64, "revised_prompt": "single_image_record"}],
+            usage={"input_tokens": 5, "output_tokens": 1056, "total_tokens": 1061},
+        )
+        headers = {"Authorization": f"Bearer {api_module.config.auth_key}"}
+
+        with patch.object(api_module, "image_history_service", self.history_service), patch.object(
+            api_module,
+            "start_limited_account_watcher",
+            return_value=_FakeThread(),
+        ):
+            with TestClient(api_module.create_app()) as client:
+                response = client.post(
+                    "/api/image-history/delete",
+                    headers=headers,
+                    json={"items": [{"record_id": record["id"], "image_ids": [record["images"][0]["id"]]}]},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["deleted_images"], 1)
+        self.assertEqual(payload["deleted_records"], 1)
+        returned_ids = [item["id"] for item in payload["items"]]
+        self.assertNotIn(record["id"], returned_ids)
+
+    def test_image_history_delete_returns_404_when_no_images_deleted(self) -> None:
+        headers = {"Authorization": f"Bearer {api_module.config.auth_key}"}
+
+        with patch.object(api_module, "image_history_service", self.history_service), patch.object(
+            api_module,
+            "start_limited_account_watcher",
+            return_value=_FakeThread(),
+        ):
+            with TestClient(api_module.create_app()) as client:
+                response = client.post(
+                    "/api/image-history/delete",
+                    headers=headers,
+                    json={"items": [{"record_id": "not-found", "image_ids": ["not-found"]}]},
+                )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"]["error"], "images not found")
+
 
 if __name__ == "__main__":
     unittest.main()

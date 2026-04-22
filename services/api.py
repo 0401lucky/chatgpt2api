@@ -87,6 +87,15 @@ class CPAImportRequest(BaseModel):
     names: list[str] = Field(default_factory=list)
 
 
+class ImageHistoryDeleteItem(BaseModel):
+    record_id: str = ""
+    image_ids: list[str] = Field(default_factory=list)
+
+
+class ImageHistoryDeleteRequest(BaseModel):
+    items: list[ImageHistoryDeleteItem] = Field(default_factory=list)
+
+
 def build_model_item(model_id: str) -> dict[str, object]:
     return {
         "id": model_id,
@@ -357,6 +366,22 @@ def create_app() -> FastAPI:
             media_type=str(image_meta.get("mime_type") or "image/png"),
             filename=image_path.name,
         )
+
+    @router.post("/api/image-history/delete")
+    async def delete_image_history_images(
+        body: ImageHistoryDeleteRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        require_auth_key(authorization)
+        delete_items = body.model_dump(mode="python").get("items") or []
+        if not delete_items:
+            raise HTTPException(status_code=404, detail={"error": "images not found"})
+
+        result = image_history_service.delete_images(delete_items)
+        if int(result.get("deleted_images") or 0) <= 0:
+            raise HTTPException(status_code=404, detail={"error": "images not found"})
+
+        return result
 
     # ── CPA multi-pool endpoints ────────────────────────────────────
 

@@ -14,6 +14,7 @@ from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService
 from services.config import config
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
+from services.image_history_service import image_history_service
 
 from services.image_service import ImageGenerationError
 from services.version import get_app_version
@@ -275,7 +276,13 @@ def create_app() -> FastAPI:
     async def generate_images(body: ImageGenerationRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
         try:
-            return await run_in_threadpool(chatgpt_service.generate_with_pool, body.prompt, body.model, body.n)
+            return await run_in_threadpool(
+                chatgpt_service.generate_api_images,
+                body.prompt,
+                body.model,
+                body.n,
+                "/v1/images/generations",
+            )
         except ImageGenerationError as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
@@ -303,7 +310,12 @@ def create_app() -> FastAPI:
 
         try:
             return await run_in_threadpool(
-                chatgpt_service.edit_with_pool, prompt, images, model, n
+                chatgpt_service.edit_api_images,
+                prompt,
+                images,
+                model,
+                n,
+                "/v1/images/edits",
             )
         except ImageGenerationError as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
@@ -317,6 +329,29 @@ def create_app() -> FastAPI:
     async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
         return await run_in_threadpool(chatgpt_service.create_response, body.model_dump(mode="python"))
+
+    @router.get("/api/image-history")
+    async def get_image_history(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        return {"items": image_history_service.list_records()}
+
+    @router.get("/api/image-history/{record_id}/images/{image_id}")
+    async def get_image_history_image(
+        record_id: str,
+        image_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        require_auth_key(authorization)
+        image_entry = image_history_service.get_image_entry(record_id, image_id)
+        if image_entry is None:
+            raise HTTPException(status_code=404, detail={"error": "image not found"})
+
+        image_meta, image_path = image_entry
+        return FileResponse(
+            image_path,
+            media_type=str(image_meta.get("mime_type") or "image/png"),
+            filename=image_path.name,
+        )
 
     # ── CPA multi-pool endpoints ────────────────────────────────────
 

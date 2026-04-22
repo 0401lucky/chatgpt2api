@@ -9,6 +9,7 @@ web_dist
 # Virtual environments
 .venv
 .idea
+.worktrees/
 data
 config.json
 edit

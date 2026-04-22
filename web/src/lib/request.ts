@@ -70,3 +70,16 @@ export async function httpRequest<T>(path: string, options: RequestOptions = {})
     const response = await request.request<T>(config);
     return response.data;
 }
+
+export async function blobRequest(path: string, options: RequestOptions = {}) {
+    const {method = "GET", headers, redirectOnUnauthorized = true} = options;
+    const config: RequestConfig = {
+        url: path,
+        method,
+        headers,
+        responseType: "blob",
+        redirectOnUnauthorized,
+    };
+    const response = await request.request<Blob>(config);
+    return response.data;
+}

@@ -97,6 +97,153 @@ class ImageHistoryService:
                     return None
         return None
 
+    def delete_images(self, items: object) -> dict[str, Any]:
+        """
+        批量删除图片。
+
+        items 输入格式：[{ record_id, image_ids }]
+        - 对无效输入不抛异常，返回 0 删除结果
+        - deleted_images 统计的是“从历史记录中移除的图片引用条目数”（不是物理文件删除数）
+        - 返回结构仅包含 items、deleted_images、deleted_records
+        """
+
+        base_dir = self.image_dir.resolve(strict=False)
+
+        def _safe_path(file_name: str) -> Path | None:
+            name = str(file_name or "").strip()
+            if not name:
+                return None
+            candidate = (self.image_dir / name).resolve(strict=False)
+            try:
+                candidate.relative_to(base_dir)
+            except Exception:
+                return None
+            if candidate == base_dir:
+                return None
+            return candidate
+
+        # 规范化输入，确保后续解析、统计与行为一致
+        normalized_items: list[dict[str, Any]] = []
+        if isinstance(items, list):
+            for raw in items:
+                if not isinstance(raw, dict):
+                    continue
+                record_id = str(raw.get("record_id") or "").strip()
+                image_ids = raw.get("image_ids")
+                if not record_id or not isinstance(image_ids, list):
+                    continue
+                normalized_ids = [str(image_id).strip() for image_id in image_ids]
+                normalized_ids = [image_id for image_id in normalized_ids if image_id]
+                if not normalized_ids:
+                    continue
+                normalized_items.append({"record_id": record_id, "image_ids": normalized_ids})
+
+        delete_plan: dict[str, set[str]] = {}
+        for item in normalized_items:
+            record_id = item["record_id"]
+            image_ids = {str(image_id).strip() for image_id in item["image_ids"] if str(image_id).strip()}
+            if not image_ids:
+                continue
+            delete_plan.setdefault(record_id, set()).update(image_ids)
+
+        removed_images = 0
+        deleted_records = 0
+        changed = False
+        paths_to_delete: list[Path] = []
+
+        # 优先保证索引一致性：锁内完成记录更新、落盘与快照生成；锁外仅做 best-effort 物理删除
+        latest_items: list[dict[str, Any]]
+        with self._lock:
+            latest_items = _copy_json(self._records)
+            if not delete_plan:
+                return {
+                    "items": latest_items,
+                    "deleted_images": 0,
+                    "deleted_records": 0,
+                }
+
+            previous_records = _copy_json(self._records)
+
+            # 统计所有 safe path 的总引用数（跨所有记录）
+            total_refs: dict[Path, int] = {}
+            for record in self._records:
+                for image in record.get("images") or []:
+                    if not isinstance(image, dict):
+                        continue
+                    safe = _safe_path(image.get("file_name"))
+                    if safe is not None:
+                        total_refs[safe] = total_refs.get(safe, 0) + 1
+
+            # 锁内更新记录：成功语义为“移除历史引用”；不依赖物理 unlink 结果
+            removed_refs: dict[Path, int] = {}
+            for idx in range(len(self._records) - 1, -1, -1):
+                record = self._records[idx]
+                record_id = str(record.get("id") or "").strip()
+                wanted_ids = delete_plan.get(record_id)
+                if not wanted_ids:
+                    continue
+
+                images = record.get("images") or []
+                if not isinstance(images, list):
+                    continue
+
+                kept_images: list[object] = []
+                removed_here = 0
+                for image in images:
+                    if not isinstance(image, dict):
+                        kept_images.append(image)
+                        continue
+
+                    image_id = str(image.get("id") or "").strip()
+                    if not image_id or image_id not in wanted_ids:
+                        kept_images.append(image)
+                        continue
+
+                    removed_here += 1
+                    safe = _safe_path(image.get("file_name"))
+                    if safe is not None:
+                        removed_refs[safe] = removed_refs.get(safe, 0) + 1
+
+                if removed_here == 0:
+                    continue
+
+                changed = True
+                removed_images += removed_here
+
+                # 只要还有任何未删除条目（包含非 dict 条目），就不应误删整条记录
+                if kept_images:
+                    record["images"] = kept_images
+                    record["image_count"] = len([img for img in kept_images if isinstance(img, dict)])
+                else:
+                    self._records.pop(idx)
+                    deleted_records += 1
+
+            if changed:
+                for path, removed_count in removed_refs.items():
+                    if total_refs.get(path, 0) - removed_count == 0:
+                        paths_to_delete.append(path)
+
+                try:
+                    self._save_records()
+                except Exception:
+                    self._records = previous_records
+                    raise
+
+            latest_items = _copy_json(self._records)
+
+        for path in paths_to_delete:
+            try:
+                if path.exists() and path.is_file():
+                    path.unlink()
+            except Exception:
+                pass
+
+        return {
+            "items": latest_items,
+            "deleted_images": removed_images,
+            "deleted_records": deleted_records,
+        }
+
     def save_record(
         self,
         *,

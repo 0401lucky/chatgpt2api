@@ -1,8 +1,29 @@
-import { httpRequest } from "@/lib/request";
+import { blobRequest, httpRequest } from "@/lib/request";
 
 export type AccountType = "Free" | "Plus" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "gpt-image-1" | "gpt-image-2";
+export type ApiImageUsage = {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+};
+export type ApiHistoryImage = {
+  id: string;
+  file_name: string;
+  mime_type: string;
+};
+export type ApiImageHistoryRecord = {
+  id: string;
+  created_at: string;
+  source_endpoint: string;
+  mode: "generate" | "edit";
+  model: string;
+  prompt: string;
+  image_count: number;
+  images: ApiHistoryImage[];
+  usage: ApiImageUsage;
+};
 
 export type Account = {
   id: string;
@@ -46,6 +67,10 @@ type AccountRefreshResponse = {
 type AccountUpdateResponse = {
   item: Account;
   items: Account[];
+};
+
+type ApiImageHistoryResponse = {
+  items: ApiImageHistoryRecord[];
 };
 
 export async function login(authKey: string) {
@@ -100,6 +125,14 @@ export async function updateAccount(
       ...updates,
     },
   });
+}
+
+export async function fetchImageHistory() {
+  return httpRequest<ApiImageHistoryResponse>("/api/image-history");
+}
+
+export async function fetchImageHistoryImage(recordId: string, imageId: string) {
+  return blobRequest(`/api/image-history/${recordId}/images/${imageId}`);
 }
 
 export async function generateImage(prompt: string, model: ImageModel = "gpt-image-1") {

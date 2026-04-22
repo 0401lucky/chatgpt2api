@@ -5,6 +5,8 @@ import uuid
 
 from fastapi import HTTPException
 
+from services.usage import build_chat_usage
+
 
 IMAGE_MODELS = {"gpt-image-1", "gpt-image-2"}
 
@@ -170,6 +172,7 @@ def build_chat_image_completion(
 ) -> dict[str, object]:
     created = int(image_result.get("created") or time.time())
     image_items = image_result.get("data") if isinstance(image_result.get("data"), list) else []
+    usage_data = image_result.get("usage") if isinstance(image_result.get("usage"), dict) else None
 
     markdown_images = []
 
@@ -183,6 +186,15 @@ def build_chat_image_completion(
         markdown_images.append(f"![image_{index}]({image_data_url})")
 
     text_content = "\n\n".join(markdown_images) if markdown_images else "Image generation completed."
+    usage = (
+        {
+            "prompt_tokens": int(usage_data.get("input_tokens") or 0),
+            "completion_tokens": int(usage_data.get("output_tokens") or 0),
+            "total_tokens": int(usage_data.get("total_tokens") or 0),
+        }
+        if usage_data
+        else build_chat_usage(prompt, len(markdown_images))
+    )
 
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
@@ -199,9 +211,5 @@ def build_chat_image_completion(
                 "finish_reason": "stop",
             }
         ],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        },
+        "usage": usage,
     }

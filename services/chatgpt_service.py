@@ -5,7 +5,9 @@ from typing import Iterable
 from fastapi import HTTPException
 
 from services.account_service import AccountService
+from services.image_history_service import ImageHistoryService, image_history_service
 from services.image_service import ImageGenerationError, edit_image_result, generate_image_result, is_token_invalid_error
+from services.usage import build_image_usage
 from services.utils import (
     build_chat_image_completion,
     extract_chat_image,
@@ -41,8 +43,54 @@ def _extract_response_image(input_value: object) -> tuple[bytes, str] | None:
 
 
 class ChatGPTService:
-    def __init__(self, account_service: AccountService):
+    def __init__(
+        self,
+        account_service: AccountService,
+        history_service: ImageHistoryService | None = None,
+    ):
         self.account_service = account_service
+        self.history_service = history_service or image_history_service
+
+    @staticmethod
+    def _attach_usage(image_result: dict[str, object], prompt: str) -> dict[str, object]:
+        image_items = image_result.get("data") if isinstance(image_result.get("data"), list) else []
+        return {
+            **image_result,
+            "usage": build_image_usage(prompt, len(image_items)),
+        }
+
+    def _persist_history(
+        self,
+        *,
+        source_endpoint: str,
+        mode: str,
+        model: str,
+        prompt: str,
+        image_result: dict[str, object],
+    ) -> None:
+        image_items = image_result.get("data") if isinstance(image_result.get("data"), list) else []
+        usage = image_result.get("usage") if isinstance(image_result.get("usage"), dict) else {}
+        if not image_items:
+            return
+        self.history_service.save_record(
+            source_endpoint=source_endpoint,
+            mode=mode,
+            model=model,
+            prompt=prompt,
+            image_items=image_items,
+            usage=usage,
+        )
+
+    def generate_api_images(self, prompt: str, model: str, n: int, source_endpoint: str) -> dict[str, object]:
+        image_result = self._attach_usage(self.generate_with_pool(prompt, model, n), prompt)
+        self._persist_history(
+            source_endpoint=source_endpoint,
+            mode="generate",
+            model=model,
+            prompt=prompt,
+            image_result=image_result,
+        )
+        return image_result
 
     def generate_with_pool(self, prompt: str, model: str, n: int):
         created = None
@@ -90,6 +138,24 @@ class ChatGPTService:
             "created": created,
             "data": image_items,
         }
+
+    def edit_api_images(
+        self,
+        prompt: str,
+        images: Iterable[tuple[bytes, str, str]],
+        model: str,
+        n: int,
+        source_endpoint: str,
+    ) -> dict[str, object]:
+        image_result = self._attach_usage(self.edit_with_pool(prompt, images, model, n), prompt)
+        self._persist_history(
+            source_endpoint=source_endpoint,
+            mode="edit",
+            model=model,
+            prompt=prompt,
+            image_result=image_result,
+        )
+        return image_result
 
     def edit_with_pool(
         self,
@@ -170,9 +236,15 @@ class ChatGPTService:
         try:
             if image_info:
                 image_data, mime_type = image_info
-                image_result = self.edit_with_pool(prompt, [(image_data, "image.png", mime_type)], model, n)
+                image_result = self.edit_api_images(
+                    prompt,
+                    [(image_data, "image.png", mime_type)],
+                    model,
+                    n,
+                    "/v1/chat/completions",
+                )
             else:
-                image_result = self.generate_with_pool(prompt, model, n)
+                image_result = self.generate_api_images(prompt, model, n, "/v1/chat/completions")
         except ImageGenerationError as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
@@ -197,9 +269,15 @@ class ChatGPTService:
         try:
             if image_info:
                 image_data, mime_type = image_info
-                image_result = self.edit_with_pool(prompt, [(image_data, "image.png", mime_type)], "gpt-image-1", 1)
+                image_result = self.edit_api_images(
+                    prompt,
+                    [(image_data, "image.png", mime_type)],
+                    model,
+                    1,
+                    "/v1/responses",
+                )
             else:
-                image_result = self.generate_with_pool(prompt, "gpt-image-1", 1)
+                image_result = self.generate_api_images(prompt, model, 1, "/v1/responses")
         except ImageGenerationError as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
@@ -225,6 +303,7 @@ class ChatGPTService:
             raise HTTPException(status_code=502, detail={"error": "image generation failed"})
 
         created = int(image_result.get("created") or 0)
+        usage = image_result.get("usage") if isinstance(image_result.get("usage"), dict) else {}
         return {
             "id": f"resp_{created}",
             "object": "response",
@@ -235,4 +314,17 @@ class ChatGPTService:
             "model": model,
             "output": output,
             "parallel_tool_calls": False,
+            "usage": {
+                "input_tokens": int(usage.get("input_tokens") or 0),
+                "output_tokens": int(usage.get("output_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or 0),
+                "input_tokens_details": usage.get("input_tokens_details") or {
+                    "text_tokens": 0,
+                    "image_tokens": 0,
+                },
+                "output_tokens_details": usage.get("output_tokens_details") or {
+                    "text_tokens": 0,
+                    "image_tokens": 0,
+                },
+            },
         }

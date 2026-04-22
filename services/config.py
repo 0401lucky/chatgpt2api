@@ -17,6 +17,8 @@ class AppSettings:
     host: str
     port: int
     accounts_file: Path
+    image_history_file: Path
+    image_history_dir: Path
     refresh_account_interval_minute: int
 
 
@@ -76,6 +78,8 @@ def _load_settings() -> AppSettings:
         host="0.0.0.0",
         port=8000,
         accounts_file=DATA_DIR / "accounts.json",
+        image_history_file=DATA_DIR / "image_history.json",
+        image_history_dir=DATA_DIR / "image-history",
         refresh_account_interval_minute=refresh_account_interval_minute,
     )
 

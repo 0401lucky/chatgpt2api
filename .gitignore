@@ -13,6 +13,5 @@ web_dist
 data
 config.json
 edit
-test
 
 docker-compose-local.yml

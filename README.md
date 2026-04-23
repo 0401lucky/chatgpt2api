@@ -59,8 +59,10 @@ docker compose up -d
 - 轮询可用账号执行图片生成与图片编辑
 - 遇到 Token 失效类错误时自动剔除无效 Token
 - 定时检查限流账号并自动刷新
-- 支持搜索、筛选、批量刷新、手动编辑和清理账号
-- 支持三种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`access_token` 导入
+- 支持网页端配置全局 HTTP / HTTPS / SOCKS5 / SOCKS5H 代理
+- 支持搜索、筛选、批量刷新、导出、手动编辑和清理账号
+- 支持四种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`sub2api` 服务器导入、`access_token` 导入
+- 支持在设置页配置 `sub2api` 服务器，筛选并批量导入其中的 OpenAI OAuth 账号
 
 ### 实验性 / 规划中
 

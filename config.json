@@ -1,4 +1,6 @@
 {
   "auth-key": "your_real_auth_key",
-  "refresh_account_interval_minute": 60
+  "refresh_account_interval_minute": 60,
+  "proxy": "",
+  "base_url": ""
 }

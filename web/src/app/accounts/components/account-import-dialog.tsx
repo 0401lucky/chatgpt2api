@@ -10,6 +10,7 @@ import {
   Files,
   KeyRound,
   LoaderCircle,
+  ServerCog,
   Upload,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -426,6 +427,16 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           title="从远程 CPA 服务器导入"
           description="前往设置页面配置远程 CPA 服务器后再执行导入。"
           icon={Files}
+          onClick={() => {
+            setOpen(false);
+            resetState();
+            router.push("/settings");
+          }}
+        />
+        <MethodCard
+          title="从 Sub2API 服务器导入"
+          description="前往设置页面配置 Sub2API 服务器，再选择其中的 OpenAI 账号导入。"
+          icon={ServerCog}
           onClick={() => {
             setOpen(false);
             resetState();

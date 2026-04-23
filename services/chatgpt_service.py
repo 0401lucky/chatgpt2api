@@ -81,8 +81,19 @@ class ChatGPTService:
             usage=usage,
         )
 
-    def generate_api_images(self, prompt: str, model: str, n: int, source_endpoint: str) -> dict[str, object]:
-        image_result = self._attach_usage(self.generate_with_pool(prompt, model, n), prompt)
+    def generate_api_images(
+        self,
+        prompt: str,
+        model: str,
+        n: int,
+        source_endpoint: str,
+        response_format: str = "b64_json",
+        base_url: str | None = None,
+    ) -> dict[str, object]:
+        image_result = self._attach_usage(
+            self.generate_with_pool(prompt, model, n, response_format=response_format, base_url=base_url),
+            prompt,
+        )
         self._persist_history(
             source_endpoint=source_endpoint,
             mode="generate",
@@ -92,7 +103,14 @@ class ChatGPTService:
         )
         return image_result
 
-    def generate_with_pool(self, prompt: str, model: str, n: int):
+    def generate_with_pool(
+        self,
+        prompt: str,
+        model: str,
+        n: int,
+        response_format: str = "b64_json",
+        base_url: str | None = None,
+    ) -> dict[str, object]:
         created = None
         image_items: list[dict[str, object]] = []
 
@@ -106,7 +124,7 @@ class ChatGPTService:
 
                 print(f"[image-generate] start pooled token={request_token[:12]}... model={model} index={index}/{n}")
                 try:
-                    result = generate_image_result(request_token, prompt, model)
+                    result = generate_image_result(request_token, prompt, model, response_format, base_url)
                     account = self.account_service.mark_image_result(request_token, success=True)
                     if created is None:
                         created = result.get("created")
@@ -146,8 +164,20 @@ class ChatGPTService:
         model: str,
         n: int,
         source_endpoint: str,
+        response_format: str = "b64_json",
+        base_url: str | None = None,
     ) -> dict[str, object]:
-        image_result = self._attach_usage(self.edit_with_pool(prompt, images, model, n), prompt)
+        image_result = self._attach_usage(
+            self.edit_with_pool(
+                prompt,
+                images,
+                model,
+                n,
+                response_format=response_format,
+                base_url=base_url,
+            ),
+            prompt,
+        )
         self._persist_history(
             source_endpoint=source_endpoint,
             mode="edit",
@@ -163,7 +193,9 @@ class ChatGPTService:
         images: Iterable[tuple[bytes, str, str]],
         model: str,
         n: int,
-    ):
+        response_format: str = "b64_json",
+        base_url: str | None = None,
+    ) -> dict[str, object]:
         created = None
         image_items: list[dict[str, object]] = []
         normalized_images = list(images)
@@ -183,7 +215,7 @@ class ChatGPTService:
                     f"model={model} index={index}/{n} images={len(normalized_images)}"
                 )
                 try:
-                    result = edit_image_result(request_token, prompt, normalized_images, model)
+                    result = edit_image_result(request_token, prompt, normalized_images, model, response_format, base_url)
                     account = self.account_service.mark_image_result(request_token, success=True)
                     if created is None:
                         created = result.get("created")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 
@@ -9,6 +10,14 @@ from services.usage import build_chat_usage
 
 
 IMAGE_MODELS = {"gpt-image-1", "gpt-image-2"}
+
+
+def anonymize_token(token: object) -> str:
+    value = str(token or "").strip()
+    if not value:
+        return "token:empty"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:10]
+    return f"token:{digest}"
 
 
 def is_image_chat_request(body: dict[str, object]) -> bool:

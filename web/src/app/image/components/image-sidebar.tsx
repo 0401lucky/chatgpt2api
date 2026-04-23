@@ -4,12 +4,11 @@ import { LoaderCircle, MessageSquarePlus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { ImageConversation } from "@/store/image-conversations";
+import { getImageConversationStats, type ImageConversation } from "@/store/image-conversations";
 
 type ImageSidebarProps = {
   conversations: ImageConversation[];
   isLoadingHistory: boolean;
-  generatingIds: Set<string>;
   selectedConversationId: string | null;
   onCreateDraft: () => void;
   onClearHistory: () => void | Promise<void>;
@@ -21,7 +20,6 @@ type ImageSidebarProps = {
 export function ImageSidebar({
   conversations,
   isLoadingHistory,
-  generatingIds,
   selectedConversationId,
   onCreateDraft,
   onClearHistory,
@@ -58,7 +56,7 @@ export function ImageSidebar({
           ) : (
             conversations.map((conversation) => {
               const active = conversation.id === selectedConversationId;
-              const generating = generatingIds.has(conversation.id);
+              const stats = getImageConversationStats(conversation);
               return (
                 <div
                   key={conversation.id}
@@ -74,13 +72,22 @@ export function ImageSidebar({
                     onClick={() => onSelectConversation(conversation.id)}
                     className="block w-full pr-8 text-left"
                   >
-                    <div className="flex items-center gap-1.5 truncate text-sm font-semibold">
-                      {generating && <LoaderCircle className="size-3.5 shrink-0 animate-spin text-stone-400" />}
+                    <div className="truncate text-sm font-semibold">
                       <span className="truncate">{conversation.title}</span>
                     </div>
                     <div className={cn("mt-1 text-xs", active ? "text-stone-500" : "text-stone-400")}>
-                      {formatConversationTime(conversation.createdAt)}
+                      {conversation.turns.length} 轮 · {formatConversationTime(conversation.updatedAt)}
                     </div>
+                    {stats.running > 0 || stats.queued > 0 ? (
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                        {stats.running > 0 ? (
+                          <span className="rounded-full bg-blue-50 px-2 py-1 text-blue-600">处理中 {stats.running}</span>
+                        ) : null}
+                        {stats.queued > 0 ? (
+                          <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-700">排队 {stats.queued}</span>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </button>
                   <button
                     type="button"

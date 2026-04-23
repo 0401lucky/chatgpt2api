@@ -12,12 +12,16 @@ from datetime import datetime
 from curl_cffi.requests import Session
 
 from services.config import config
+from services.proxy_service import proxy_settings
+from services.utils import anonymize_token
 
 
 class AccountService:
     ACCOUNT_TYPE_MAP = {
         "free": "Free",
         "plus": "Plus",
+        "prolite": "ProLite",
+        "pro_lite": "ProLite",
         "team": "Team",
         "pro": "Pro",
         "personal": "Plus",
@@ -65,8 +69,11 @@ class AccountService:
     def _is_image_account_available(account: dict) -> bool:
         if not isinstance(account, dict):
             return False
-        if account.get("status") == "禁用":
+        status = str(account.get("status") or "").strip()
+        if status in {"禁用", "限流", "异常"}:
             return False
+        if bool(account.get("image_quota_unknown")):
+            return True
         return int(account.get("quota") or 0) > 0
 
     def _decode_access_token_payload(self, access_token: str) -> dict[str, Any]:
@@ -109,6 +116,7 @@ class AccountService:
         token_payload = self._decode_access_token_payload(access_token)
 
         auth_payload = token_payload.get("https://api.openai.com/auth")
+        print("检测账户类型响应", auth_payload)
         if isinstance(auth_payload, dict):
             matched = self._normalize_account_type(auth_payload.get("chatgpt_plan_type"))
             if matched:
@@ -134,6 +142,7 @@ class AccountService:
         normalized["quota"] = int(normalized.get("quota") if normalized.get("quota") is not None else 0)
         if normalized["quota"] < 0:
             normalized["quota"] = 0
+        normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
         normalized["email"] = self._clean_token(normalized.get("email")) or None
         normalized["user_id"] = self._clean_token(normalized.get("user_id")) or None
         limits_progress = normalized.get("limits_progress")
@@ -146,7 +155,7 @@ class AccountService:
         return normalized
 
     @staticmethod
-    def _extract_quota_and_restore_at(limits_progress: list[Any]) -> tuple[int, str | None]:
+    def _extract_quota_and_restore_at(limits_progress: list[Any]) -> tuple[int, str | None, bool]:
         quota = 0
         restore_at = None
         for item in limits_progress:
@@ -154,8 +163,8 @@ class AccountService:
                 continue
             quota = int(item.get("remaining") or 0)
             restore_at = str(item.get("reset_after") or "").strip() or None
-            break
-        return quota, restore_at
+            return quota, restore_at, False
+        return quota, restore_at, True
 
     def _load_accounts(self) -> list[dict]:
         if not self.store_file.exists():
@@ -191,10 +200,10 @@ class AccountService:
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
             "user-agent": user_agent
-            or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                          or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "sec-ch-ua": self._clean_token(account.get("sec-ch-ua"))
-            or '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+                         or '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
             "sec-ch-ua-mobile": self._clean_token(account.get("sec-ch-ua-mobile")) or "?0",
             "sec-ch-ua-platform": self._clean_token(account.get("sec-ch-ua-platform")) or '"Windows"',
         }
@@ -216,6 +225,7 @@ class AccountService:
             "type": account.get("type") or "Free",
             "status": account.get("status") or "正常",
             "quota": account.get("quota") if account.get("quota") is not None else 0,
+            "imageQuotaUnknown": bool(account.get("image_quota_unknown")),
             "email": account.get("email"),
             "user_id": account.get("user_id"),
             "limits_progress": account.get("limits_progress") or [],
@@ -259,8 +269,8 @@ class AccountService:
             token
             for item in self._accounts
             if self._is_image_account_available(item)
-            and (token := self._clean_token(item.get("access_token")))
-            and token not in excluded
+               and (token := self._clean_token(item.get("access_token")))
+               and token not in excluded
         ]
 
     def _pick_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
@@ -273,11 +283,12 @@ class AccountService:
             return access_token
 
     def refresh_account_state(self, access_token: str) -> dict | None:
+        token_ref = anonymize_token(access_token)
         try:
             remote_info = self.fetch_remote_info(access_token)
         except Exception as exc:
             message = str(exc)
-            print(f"[account-available] refresh token={access_token[:12]}... fail {message}")
+            print(f"[account-available] refresh token={token_ref} fail {message}")
             if "/backend-api/me failed: HTTP 401" in message:
                 return self.update_account(
                     access_token,
@@ -294,11 +305,12 @@ class AccountService:
         while True:
             access_token = self._pick_next_candidate_token(excluded_tokens=attempted_tokens)
             attempted_tokens.add(access_token)
+            token_ref = anonymize_token(access_token)
             account = self.refresh_account_state(access_token)
             if self._is_image_account_available(account or {}):
                 return access_token
             print(
-                f"[account-available] skip token={access_token[:12]}... "
+                f"[account-available] skip token={token_ref} "
                 f"quota={account.get('quota') if account else 'unknown'} "
                 f"status={account.get('status') if account else 'unknown'}"
             )
@@ -337,7 +349,7 @@ class AccountService:
                 token
                 for item in self._accounts
                 if item.get("status") == "限流"
-                and (token := self._clean_token(item.get("access_token")))
+                   and (token := self._clean_token(item.get("access_token")))
             ]
 
     def add_accounts(self, tokens: list[str]) -> dict:
@@ -376,7 +388,8 @@ class AccountService:
             return {"removed": 0, "items": self.list_accounts()}
         with self._lock:
             before = len(self._accounts)
-            self._accounts = [item for item in self._accounts if self._clean_token(item.get("access_token")) not in target_set]
+            self._accounts = [item for item in self._accounts if
+                              self._clean_token(item.get("access_token")) not in target_set]
             removed = before - len(self._accounts)
             if self._accounts:
                 self._index %= len(self._accounts)
@@ -428,10 +441,12 @@ class AccountService:
                 return None
             next_item = dict(self._accounts[index])
             next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            image_quota_unknown = bool(next_item.get("image_quota_unknown"))
             if success:
                 next_item["success"] = int(next_item.get("success") or 0) + 1
-                next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
-                if next_item["quota"] == 0:
+                if not image_quota_unknown:
+                    next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
+                if not image_quota_unknown and next_item["quota"] == 0:
                     next_item["status"] = "限流"
                     next_item["restore_at"] = next_item.get("restore_at") or None
                 elif next_item.get("status") == "限流":
@@ -452,8 +467,9 @@ class AccountService:
             raise ValueError("access_token is required")
 
         headers, impersonate = self._build_remote_headers(access_token)
-        print(f"[account-refresh] start {access_token[:12]}...")
-        session = Session(impersonate=impersonate, verify=True)
+        token_ref = anonymize_token(access_token)
+        print(f"[account-refresh] start {token_ref}")
+        session = Session(**proxy_settings.build_session_kwargs(impersonate=impersonate, verify=True))
         session.headers.update(headers)
         try:
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -493,14 +509,16 @@ class AccountService:
             if not isinstance(limits_progress, list):
                 limits_progress = []
 
-            quota, restore_at = self._extract_quota_and_restore_at(limits_progress)
-            status = "限流" if quota == 0 else "正常"
+            account_type = self._detect_account_type(access_token, me_payload, init_payload)
+            quota, restore_at, image_quota_unknown = self._extract_quota_and_restore_at(limits_progress)
+            status = "正常" if image_quota_unknown and account_type != "Free" else ("限流" if quota == 0 else "正常")
 
             result = {
                 "email": me_payload.get("email"),
                 "user_id": me_payload.get("id"),
-                "type": self._detect_account_type(access_token, me_payload, init_payload),
+                "type": account_type,
                 "quota": quota,
+                "image_quota_unknown": image_quota_unknown,
                 "limits_progress": limits_progress,
                 "default_model_slug": init_payload.get("default_model_slug"),
                 "restore_at": restore_at,
@@ -508,8 +526,7 @@ class AccountService:
             }
             print(
                 "[account-refresh] ok",
-                result.get("user_id"),
-                result.get("email"),
+                token_ref,
                 f"quota={result.get('quota')}",
                 f"restore_at={result.get('restore_at')}",
             )
@@ -527,7 +544,8 @@ class AccountService:
         max_workers = min(10, len(cleaned_tokens))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(self.fetch_remote_info, access_token): access_token for access_token in cleaned_tokens}
+            future_map = {executor.submit(self.fetch_remote_info, access_token): access_token for access_token in
+                          cleaned_tokens}
             for future in as_completed(future_map):
                 access_token = future_map[future]
                 try:
@@ -536,7 +554,7 @@ class AccountService:
                         refreshed += 1
                 except Exception as exc:
                     message = str(exc)
-                    print(f"[account-refresh] fail {access_token[:12]}... {message}")
+                    print(f"[account-refresh] fail {anonymize_token(access_token)} {message}")
                     if "/backend-api/me failed: HTTP 401" in message:
                         self.update_account(
                             access_token,

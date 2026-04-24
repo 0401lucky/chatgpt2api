@@ -93,7 +93,7 @@ class GitStorageBackend(StorageBackend):
             return data if isinstance(data, list) else []
         except Exception as e:
             print(f"[git-storage] load failed: {e}")
-            return []
+            raise
 
     def save_accounts(self, accounts: list[dict[str, Any]]) -> None:
         """保存账号数据到 Git 仓库"""

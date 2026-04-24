@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import Column, String, Text, create_engine, Integer
+from sqlalchemy import Column, String, Text, create_engine, Integer, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -84,7 +84,7 @@ class DatabaseStorageBackend(StorageBackend):
             session = self.Session()
             try:
                 # 尝试执行简单查询
-                session.execute("SELECT 1")
+                session.execute(text("SELECT 1"))
                 count = session.query(AccountModel).count()
                 return {
                     "status": "healthy",

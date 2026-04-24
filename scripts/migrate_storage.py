@@ -18,14 +18,15 @@ from pathlib import Path
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
 from services.storage.factory import create_storage_backend
-from services.config import DATA_DIR
 
 
 def export_to_json(output_file: str):
     """导出当前存储后端的数据到 JSON 文件"""
     print(f"[migrate] Exporting data to {output_file}")
-    
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     storage = create_storage_backend(DATA_DIR)
     accounts = storage.load_accounts()
     
@@ -42,7 +43,7 @@ def export_to_json(output_file: str):
 def import_from_json(input_file: str):
     """从 JSON 文件导入数据到当前存储后端"""
     print(f"[migrate] Importing data from {input_file}")
-    
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     input_path = Path(input_file)
     if not input_path.exists():
         print(f"[migrate] Error: File not found: {input_file}")
@@ -66,7 +67,7 @@ def import_from_json(input_file: str):
 def migrate_data(from_backend: str, to_backend: str):
     """从一个存储后端迁移到另一个"""
     print(f"[migrate] Migrating from {from_backend} to {to_backend}")
-    
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     # 保存原始环境变量
     original_backend = os.environ.get("STORAGE_BACKEND")
     

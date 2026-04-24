@@ -13,12 +13,14 @@ from pathlib import Path
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
 from services.storage.factory import create_storage_backend
-from services.config import DATA_DIR
 
 
 def test_storage():
     """测试当前配置的存储后端"""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     print("=" * 60)
     print("ChatGPT2API 存储后端测试")
     print("=" * 60)

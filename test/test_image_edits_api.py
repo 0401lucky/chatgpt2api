@@ -1,10 +1,12 @@
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from services import api as api_module
+from api import app as app_module
+from api import support as support_module
 
 
 class _FakeThread:
@@ -48,19 +50,23 @@ class ImageEditsApiTests(unittest.TestCase):
     def setUp(self) -> None:
         _FakeChatGPTService.last_call = None
         self.auth_header = {"Authorization": "Bearer test-auth"}
+        self.fake_config = SimpleNamespace(
+            auth_key="test-auth",
+            app_version="test-version",
+            images_dir=Path.cwd(),
+            refresh_account_interval_minute=60,
+            base_url="",
+        )
         self.patches = [
-            mock.patch.object(api_module, "ChatGPTService", _FakeChatGPTService),
-            mock.patch.object(
-                api_module,
-                "config",
-                SimpleNamespace(auth_key="test-auth", refresh_account_interval_minute=60),
-            ),
-            mock.patch.object(api_module, "start_limited_account_watcher", lambda _stop_event: _FakeThread()),
+            mock.patch.object(app_module, "ChatGPTService", _FakeChatGPTService),
+            mock.patch.object(app_module, "config", self.fake_config),
+            mock.patch.object(support_module, "config", self.fake_config),
+            mock.patch.object(app_module, "start_limited_account_watcher", lambda _stop_event: _FakeThread()),
         ]
         for patcher in self.patches:
             patcher.start()
         self.addCleanup(self._cleanup_patches)
-        self.client = TestClient(api_module.create_app())
+        self.client = TestClient(app_module.create_app())
         self.addCleanup(self.client.close)
 
     def _cleanup_patches(self) -> None:

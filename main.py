@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uvicorn
-from services.api import create_app
+from api import create_app
 
 app = create_app()
 

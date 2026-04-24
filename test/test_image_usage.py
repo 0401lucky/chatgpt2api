@@ -10,7 +10,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from services.chatgpt_service import ChatGPTService
 from services.usage import build_chat_usage, build_image_usage
-from services.utils import build_chat_image_completion
+from utils.helper import build_chat_image_completion, is_image_chat_request
 
 
 PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWbQAAAAASUVORK5CYII="
@@ -30,6 +30,11 @@ class DummyHistoryService:
 
 
 class ImageUsageTests(unittest.TestCase):
+    def test_gpt_image_1_is_still_treated_as_image_chat_model(self) -> None:
+        self.assertTrue(is_image_chat_request({"model": "gpt-image-1"}))
+        self.assertTrue(is_image_chat_request({"model": "gpt-image-2"}))
+        self.assertTrue(is_image_chat_request({"model": "codex-gpt-image-2"}))
+
     def test_build_image_usage_estimates_prompt_and_output_tokens(self) -> None:
         usage = build_image_usage("生成一只猫", image_count=2)
 

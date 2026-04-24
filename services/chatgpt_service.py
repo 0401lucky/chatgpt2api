@@ -1067,7 +1067,7 @@ class ChatGPTService:
         except ImageGenerationError as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
-        return build_chat_image_completion(model, image_result)
+        return build_chat_image_completion(model, prompt, image_result)
 
     def _stream_image_chat_completion(self, body: dict[str, object]) -> Iterator[dict[str, object]]:
         model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"

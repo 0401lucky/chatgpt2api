@@ -1,17 +1,23 @@
-import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
+import shutil
 from unittest.mock import patch
 import sys
+import uuid
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+TEST_TMP_DIR = ROOT_DIR
+TEST_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 from fastapi.testclient import TestClient
 
-import services.api as api_module
+from api import ai as ai_module
+from api import app as app_module
+from api import support as support_module
 from services.image_history_service import ImageHistoryService
 
 
@@ -25,8 +31,20 @@ class _FakeThread:
 
 class ImageHistoryApiTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        base_dir = Path(self.temp_dir.name)
+        self.temp_dir_path = TEST_TMP_DIR / f".tmp-image-history-{uuid.uuid4().hex}"
+        self.temp_dir_path.mkdir(parents=True, exist_ok=True)
+        base_dir = self.temp_dir_path
+        self.fake_config = type(
+            "FakeConfig",
+            (),
+            {
+                "auth_key": "test-auth",
+                "app_version": "test-version",
+                "images_dir": base_dir / "images",
+                "refresh_account_interval_minute": 60,
+                "base_url": "",
+            },
+        )()
         self.history_service = ImageHistoryService(
             store_file=base_dir / "image_history.json",
             image_dir=base_dir / "image-history",
@@ -42,15 +60,21 @@ class ImageHistoryApiTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+        shutil.rmtree(self.temp_dir_path, ignore_errors=True)
+
+    def _patches(self):
+        return (
+            patch.object(ai_module, "image_history_service", self.history_service),
+            patch.object(app_module, "config", self.fake_config),
+            patch.object(support_module, "config", self.fake_config),
+            patch.object(app_module, "start_limited_account_watcher", return_value=_FakeThread()),
+        )
 
     def test_image_history_requires_authentication(self) -> None:
-        with patch.object(api_module, "image_history_service", self.history_service), patch.object(
-            api_module,
-            "start_limited_account_watcher",
-            return_value=_FakeThread(),
-        ):
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._patches():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 response = client.get("/api/image-history")
 
         self.assertEqual(response.status_code, 401)
@@ -58,14 +82,12 @@ class ImageHistoryApiTests(unittest.TestCase):
     def test_image_history_list_and_image_download(self) -> None:
         record = self.history_service.list_records()[0]
         image = record["images"][0]
-        headers = {"Authorization": f"Bearer {api_module.config.auth_key}"}
+        headers = {"Authorization": f"Bearer {self.fake_config.auth_key}"}
 
-        with patch.object(api_module, "image_history_service", self.history_service), patch.object(
-            api_module,
-            "start_limited_account_watcher",
-            return_value=_FakeThread(),
-        ):
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._patches():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 list_response = client.get("/api/image-history", headers=headers)
                 image_response = client.get(
                     f"/api/image-history/{record['id']}/images/{image['id']}",
@@ -84,12 +106,10 @@ class ImageHistoryApiTests(unittest.TestCase):
         self.assertEqual(missing_response.status_code, 404)
 
     def test_image_history_delete_requires_authentication(self) -> None:
-        with patch.object(api_module, "image_history_service", self.history_service), patch.object(
-            api_module,
-            "start_limited_account_watcher",
-            return_value=_FakeThread(),
-        ):
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._patches():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 response = client.post(
                     "/api/image-history/delete",
                     json={"items": [{"record_id": "any", "image_ids": ["any"]}]},
@@ -114,14 +134,12 @@ class ImageHistoryApiTests(unittest.TestCase):
             image_items=[{"b64_json": PNG_B64, "revised_prompt": "record_b"} for _ in range(2)],
             usage={"input_tokens": 5, "output_tokens": 1056, "total_tokens": 1061},
         )
-        headers = {"Authorization": f"Bearer {api_module.config.auth_key}"}
+        headers = {"Authorization": f"Bearer {self.fake_config.auth_key}"}
 
-        with patch.object(api_module, "image_history_service", self.history_service), patch.object(
-            api_module,
-            "start_limited_account_watcher",
-            return_value=_FakeThread(),
-        ):
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._patches():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 response = client.post(
                     "/api/image-history/delete",
                     headers=headers,
@@ -152,14 +170,12 @@ class ImageHistoryApiTests(unittest.TestCase):
             image_items=[{"b64_json": PNG_B64, "revised_prompt": "single_image_record"}],
             usage={"input_tokens": 5, "output_tokens": 1056, "total_tokens": 1061},
         )
-        headers = {"Authorization": f"Bearer {api_module.config.auth_key}"}
+        headers = {"Authorization": f"Bearer {self.fake_config.auth_key}"}
 
-        with patch.object(api_module, "image_history_service", self.history_service), patch.object(
-            api_module,
-            "start_limited_account_watcher",
-            return_value=_FakeThread(),
-        ):
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._patches():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 response = client.post(
                     "/api/image-history/delete",
                     headers=headers,
@@ -174,14 +190,12 @@ class ImageHistoryApiTests(unittest.TestCase):
         self.assertNotIn(record["id"], returned_ids)
 
     def test_image_history_delete_returns_404_when_no_images_deleted(self) -> None:
-        headers = {"Authorization": f"Bearer {api_module.config.auth_key}"}
+        headers = {"Authorization": f"Bearer {self.fake_config.auth_key}"}
 
-        with patch.object(api_module, "image_history_service", self.history_service), patch.object(
-            api_module,
-            "start_limited_account_watcher",
-            return_value=_FakeThread(),
-        ):
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._patches():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 response = client.post(
                     "/api/image-history/delete",
                     headers=headers,

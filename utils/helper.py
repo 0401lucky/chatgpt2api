@@ -10,8 +10,9 @@ from curl_cffi import requests
 import re
 from fastapi import HTTPException
 from utils.log import logger
+from services.usage import build_chat_usage
 
-IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
+IMAGE_MODELS = {"gpt-image-1", "gpt-image-2", "codex-gpt-image-2"}
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 
@@ -222,8 +223,30 @@ def parse_image_count(raw_value: object) -> int:
     return value
 
 
-def build_chat_image_completion(model: str, image_result: dict[str, object]) -> dict[str, object]:
+def build_chat_image_completion(
+    model: str,
+    prompt: str,
+    image_result: dict[str, object],
+) -> dict[str, object]:
     created = int(image_result.get("created") or time.time())
+    image_items = image_result.get("data") if isinstance(image_result.get("data"), list) else []
+    usage_data = image_result.get("usage") if isinstance(image_result.get("usage"), dict) else None
+    markdown_images: list[str] = []
+    for index, item in enumerate(image_items, start=1):
+        if not isinstance(item, dict):
+            continue
+        b64_json = str(item.get("b64_json") or "").strip()
+        if b64_json:
+            markdown_images.append(f"![image_{index}](data:image/png;base64,{b64_json})")
+    usage = (
+        {
+            "prompt_tokens": int(usage_data.get("input_tokens") or 0),
+            "completion_tokens": int(usage_data.get("output_tokens") or 0),
+            "total_tokens": int(usage_data.get("total_tokens") or 0),
+        }
+        if usage_data
+        else build_chat_usage(prompt, len(markdown_images))
+    )
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
@@ -231,10 +254,10 @@ def build_chat_image_completion(model: str, image_result: dict[str, object]) -> 
         "model": model,
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": build_chat_image_markdown_content(image_result)},
+            "message": {"role": "assistant", "content": "\n\n".join(markdown_images) if markdown_images else "Image generation completed."},
             "finish_reason": "stop",
         }],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": usage,
     }
 
 

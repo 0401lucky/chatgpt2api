@@ -1,18 +1,24 @@
-import tempfile
 import types
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
+import shutil
 from unittest.mock import patch
 import sys
+import uuid
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+TEST_TMP_DIR = ROOT_DIR
+TEST_TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 from fastapi.testclient import TestClient
 
-import services.api as api_module
+from api import accounts as accounts_module
+from api import app as app_module
+from api import support as support_module
 from services.account_service import AccountService
 
 
@@ -23,8 +29,9 @@ class _FakeThread:
 
 class AccountApiSecurityTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.service = AccountService(Path(self.temp_dir.name) / "accounts.json")
+        self.temp_dir_path = TEST_TMP_DIR / f".tmp-account-api-{uuid.uuid4().hex}"
+        self.temp_dir_path.mkdir(parents=True, exist_ok=True)
+        self.service = AccountService(self.temp_dir_path / "accounts.json")
         self.service.add_accounts(
             [
                 "token-alpha-1234567890",
@@ -50,21 +57,32 @@ class AccountApiSecurityTests(unittest.TestCase):
                 "type": "Free",
             },
         )
-        self.headers = {"Authorization": f"Bearer {api_module.config.auth_key}"}
+        self.fake_config = types.SimpleNamespace(
+            auth_key="test-auth",
+            app_version="test-version",
+            images_dir=self.temp_dir_path / "images",
+            refresh_account_interval_minute=60,
+            base_url="",
+        )
+        self.headers = {"Authorization": f"Bearer {self.fake_config.auth_key}"}
 
     def tearDown(self) -> None:
-        self.temp_dir.cleanup()
+        shutil.rmtree(self.temp_dir_path, ignore_errors=True)
 
     def _build_client(self):
-        return patch.object(api_module, "account_service", self.service), patch.object(
-            api_module,
-            "start_limited_account_watcher",
-            return_value=_FakeThread(),
+        return (
+            patch.object(accounts_module, "account_service", self.service),
+            patch.object(app_module, "account_service", self.service),
+            patch.object(app_module, "config", self.fake_config),
+            patch.object(support_module, "config", self.fake_config),
+            patch.object(app_module, "start_limited_account_watcher", return_value=_FakeThread()),
         )
 
     def test_account_list_hides_access_token(self) -> None:
-        with self._build_client()[0], self._build_client()[1]:
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._build_client():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 response = client.get("/api/accounts", headers=self.headers)
 
         self.assertEqual(response.status_code, 200)
@@ -76,8 +94,10 @@ class AccountApiSecurityTests(unittest.TestCase):
     def test_update_account_uses_account_id(self) -> None:
         account_id = self.service.list_accounts()[0]["id"]
 
-        with self._build_client()[0], self._build_client()[1]:
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._build_client():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 response = client.post(
                     "/api/accounts/update",
                     headers=self.headers,
@@ -91,8 +111,10 @@ class AccountApiSecurityTests(unittest.TestCase):
         accounts = self.service.list_accounts()
         target_id = accounts[0]["id"]
 
-        with self._build_client()[0], self._build_client()[1]:
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._build_client():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 response = client.request(
                     "DELETE",
                     "/api/accounts",
@@ -123,8 +145,10 @@ class AccountApiSecurityTests(unittest.TestCase):
 
         self.service.fetch_remote_info = types.MethodType(fake_fetch_remote_info, self.service)
 
-        with self._build_client()[0], self._build_client()[1]:
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._build_client():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 response = client.post(
                     "/api/accounts/refresh",
                     headers=self.headers,
@@ -142,8 +166,10 @@ class AccountApiSecurityTests(unittest.TestCase):
 
         self.service.fetch_remote_info = types.MethodType(fake_fetch_remote_info, self.service)
 
-        with self._build_client()[0], self._build_client()[1]:
-            with TestClient(api_module.create_app()) as client:
+        with ExitStack() as stack:
+            for patcher in self._build_client():
+                stack.enter_context(patcher)
+            with TestClient(app_module.create_app()) as client:
                 response = client.post(
                     "/api/accounts/refresh",
                     headers=self.headers,

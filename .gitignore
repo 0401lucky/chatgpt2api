@@ -11,6 +11,9 @@ web_dist
 .idea
 .worktrees/
 .tmp-test/
+.tmp-account-api-*/
+.tmp-image-history-*/
+.tmp-upstream-latest/
 .playwright-mcp/
 .pytest_cache/
 data

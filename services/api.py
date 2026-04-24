@@ -9,13 +9,13 @@ from threading import Event, Thread
 from fastapi import APIRouter, FastAPI, Header, Request, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import FormData, UploadFile
 
 from services.account_service import account_service
-from services.chatgpt_service import ChatGPTService
+from services.chatgpt_service import ChatGPTService, ImageGenerationError
 from services.config import config
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.image_history_service import image_history_service
@@ -27,9 +27,9 @@ from services.sub2api_service import (
     sub2api_import_service,
 )
 
-from services.image_service import ImageGenerationError
 from services.utils import parse_image_count
 from services.version import get_app_version
+from utils.helper import is_image_chat_request, sse_json_stream
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
@@ -41,6 +41,7 @@ class ImageGenerationRequest(BaseModel):
     n: int = Field(default=1, ge=1, le=4)
     response_format: str = "b64_json"
     history_disabled: bool = True
+    stream: bool | None = None
 
 
 class AccountCreateRequest(BaseModel):
@@ -143,15 +144,6 @@ class ProxyTestRequest(BaseModel):
     url: str = ""
 
 
-def build_model_item(model_id: str) -> dict[str, object]:
-    return {
-        "id": model_id,
-        "object": "model",
-        "created": 0,
-        "owned_by": "chatgpt2api",
-    }
-
-
 def sanitize_cpa_pool(pool: dict | None) -> dict | None:
     if not isinstance(pool, dict):
         return None
@@ -196,6 +188,13 @@ def require_auth_key(authorization: str | None) -> None:
 def resolve_image_base_url(request: Request) -> str:
     configured_base_url = str(getattr(config, "base_url", "") or "").strip().rstrip("/")
     return configured_base_url or f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+
+
+def raise_image_quota_error(exc: Exception) -> None:
+    message = str(exc)
+    if "no available image quota" in message.lower():
+        raise HTTPException(status_code=429, detail={"error": "no available image quota"}) from exc
+    raise HTTPException(status_code=502, detail={"error": message}) from exc
 
 
 def bad_request(message: str) -> HTTPException:
@@ -277,7 +276,13 @@ async def _normalize_multipart_edit_images(form: FormData) -> list[tuple[bytes, 
     return images
 
 
-async def _parse_image_edit_request(request: Request) -> tuple[str, str, int, str, list[tuple[bytes, str, str]]]:
+def _parse_stream_flag(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _parse_image_edit_request(request: Request) -> tuple[str, str, int, str, bool, list[tuple[bytes, str, str]]]:
     content_type = str(request.headers.get("content-type") or "").lower()
     if content_type.startswith("application/json"):
         try:
@@ -292,22 +297,24 @@ async def _parse_image_edit_request(request: Request) -> tuple[str, str, int, st
         if not prompt:
             raise bad_request("prompt is required")
 
-        model = str(body.get("model") or "gpt-image-1").strip() or "gpt-image-1"
+        model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
         n = parse_image_count(body.get("n"))
         response_format = str(body.get("response_format") or "b64_json").strip() or "b64_json"
+        stream = _parse_stream_flag(body.get("stream"))
         images = _normalize_json_edit_images(body.get("images"))
-        return prompt, model, n, response_format, images
+        return prompt, model, n, response_format, stream, images
 
     form = await request.form()
     prompt = str(form.get("prompt") or "").strip()
     if not prompt:
         raise bad_request("prompt is required")
 
-    model = str(form.get("model") or "gpt-image-1").strip() or "gpt-image-1"
+    model = str(form.get("model") or "gpt-image-2").strip() or "gpt-image-2"
     n = parse_image_count(form.get("n"))
     response_format = str(form.get("response_format") or "b64_json").strip() or "b64_json"
+    stream = _parse_stream_flag(form.get("stream"))
     images = await _normalize_multipart_edit_images(form)
-    return prompt, model, n, response_format, images
+    return prompt, model, n, response_format, stream, images
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
@@ -380,14 +387,12 @@ def create_app() -> FastAPI:
     router = APIRouter()
 
     @router.get("/v1/models")
-    async def list_models():
-        return {
-            "object": "list",
-            "data": [
-                build_model_item("gpt-image-1"),
-                build_model_item("gpt-image-2"),
-            ],
-        }
+    async def list_models(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        try:
+            return await run_in_threadpool(chatgpt_service.list_models)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
     @router.post("/auth/login")
     async def login(authorization: str | None = Header(default=None)):
@@ -486,6 +491,23 @@ def create_app() -> FastAPI:
     ):
         require_auth_key(authorization)
         base_url = resolve_image_base_url(request)
+        if body.stream:
+            try:
+                await run_in_threadpool(account_service.get_available_access_token)
+            except RuntimeError as exc:
+                raise_image_quota_error(exc)
+            return StreamingResponse(
+                sse_json_stream(
+                    chatgpt_service.stream_image_generation(
+                        body.prompt,
+                        body.model,
+                        body.n,
+                        body.response_format,
+                        base_url,
+                    )
+                ),
+                media_type="text/event-stream",
+            )
         try:
             return await run_in_threadpool(
                 chatgpt_service.generate_api_images,
@@ -497,7 +519,7 @@ def create_app() -> FastAPI:
                 base_url,
             )
         except ImageGenerationError as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            raise_image_quota_error(exc)
 
     @router.post("/v1/images/edits")
     async def edit_images(
@@ -506,8 +528,24 @@ def create_app() -> FastAPI:
     ):
         require_auth_key(authorization)
         # JSON 和 multipart 最终都归一成同一图片元组结构，复用现有编辑主流程。
-        prompt, model, n, response_format, images = await _parse_image_edit_request(request)
+        prompt, model, n, response_format, stream, images = await _parse_image_edit_request(request)
         base_url = resolve_image_base_url(request)
+        if stream:
+            if not account_service.has_available_account():
+                raise_image_quota_error(RuntimeError("no available image quota"))
+            return StreamingResponse(
+                sse_json_stream(
+                    chatgpt_service.stream_image_edit(
+                        prompt,
+                        images,
+                        model,
+                        n,
+                        response_format,
+                        base_url,
+                    )
+                ),
+                media_type="text/event-stream",
+            )
 
         try:
             return await run_in_threadpool(
@@ -521,17 +559,34 @@ def create_app() -> FastAPI:
                 base_url,
             )
         except ImageGenerationError as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            raise_image_quota_error(exc)
 
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
-        return await run_in_threadpool(chatgpt_service.create_image_completion, body.model_dump(mode="python"))
+        payload = body.model_dump(mode="python")
+        if bool(payload.get("stream")):
+            if is_image_chat_request(payload):
+                try:
+                    await run_in_threadpool(account_service.get_available_access_token)
+                except RuntimeError as exc:
+                    raise_image_quota_error(exc)
+            return StreamingResponse(
+                sse_json_stream(chatgpt_service.stream_chat_completion(payload)),
+                media_type="text/event-stream",
+            )
+        return await run_in_threadpool(chatgpt_service.create_chat_completion, payload)
 
     @router.post("/v1/responses")
     async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
-        return await run_in_threadpool(chatgpt_service.create_response, body.model_dump(mode="python"))
+        payload = body.model_dump(mode="python")
+        if bool(payload.get("stream")):
+            return StreamingResponse(
+                sse_json_stream(chatgpt_service.stream_response(payload)),
+                media_type="text/event-stream",
+            )
+        return await run_in_threadpool(chatgpt_service.create_response, payload)
 
     @router.get("/api/image-history")
     async def get_image_history(authorization: str | None = Header(default=None)):

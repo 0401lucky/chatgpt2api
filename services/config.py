@@ -9,6 +9,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
+VERSION_FILE = BASE_DIR / "VERSION"
 PLACEHOLDER_AUTH_KEYS = {
     "your_real_auth_key",
     "replace-me",
@@ -132,6 +133,14 @@ class ConfigStore:
             or ""
         ).strip().rstrip("/")
 
+    @property
+    def app_version(self) -> str:
+        try:
+            value = VERSION_FILE.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return "0.0.0"
+        return value or "0.0.0"
+
     def get(self) -> dict[str, object]:
         return dict(self.data)
 
@@ -139,7 +148,11 @@ class ConfigStore:
         return str(self.data.get("proxy") or "").strip()
 
     def update(self, data: dict[str, object]) -> dict[str, object]:
-        self.data = dict(data or {})
+        next_data = dict(self.data)
+        next_data.update(dict(data or {}))
+        if not _normalize_auth_key(next_data.get("auth-key")):
+            next_data["auth-key"] = self.data.get("auth-key") or os.getenv("CHATGPT2API_AUTH_KEY") or ""
+        self.data = next_data
         self._save()
         return self.get()
 

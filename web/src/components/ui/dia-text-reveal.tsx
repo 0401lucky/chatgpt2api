@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   animate,
   motion,
@@ -138,14 +138,26 @@ export function DiaTextReveal({
   fixedWidth = false,
   ...props
 }: DiaTextRevealProps) {
-  const textKey = Array.isArray(text) ? text.join("\0") : text
-  const texts = useMemo(() => (Array.isArray(text) ? [...text] : [text]), [text])
+  const texts = useMemo(() => (Array.isArray(text) ? text : [text]), [text])
+  const textKey = texts.join("\0")
   const isMulti = texts.length > 1
   const prefersReducedMotion = useReducedMotion()
 
   const spanRef = useRef<HTMLSpanElement>(null)
+  const optsRef = useRef({
+    colors,
+    textColor,
+    duration,
+    delay,
+    repeat,
+    repeatDelay,
+    texts,
+  })
+
+  const indexRef = useRef(0)
   const hasPlayedRef = useRef(false)
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const playRef = useRef<() => void>(null!)
   const stopRef = useRef<(() => void) | null>(null)
 
   const [activeIndex, setActiveIndex] = useState(0)
@@ -153,9 +165,21 @@ export function DiaTextReveal({
 
   const sweepPos = useMotionValue(SWEEP_START)
 
-  const backgroundImage = useTransform(sweepPos, (pos) => buildGradient(pos, colors, textColor))
+  const backgroundImage = useTransform(sweepPos, (pos) =>
+    buildGradient(pos, optsRef.current.colors, optsRef.current.textColor)
+  )
 
   const isInView = useInView(spanRef, { once, amount: 0.1 })
+
+  optsRef.current = {
+    colors,
+    textColor,
+    duration,
+    delay,
+    repeat,
+    repeatDelay,
+    texts,
+  }
 
   useEffect(() => {
     const el = spanRef.current
@@ -163,24 +187,30 @@ export function DiaTextReveal({
     setMeasuredWidths(measureWidths(el, texts))
   }, [isMulti, textKey, texts])
 
-  const play = useCallback(function playAnimation() {
-    sweepPos.set(SWEEP_START)
+  useEffect(() => {
+    playRef.current = () => {
+      const { duration, delay, repeat, repeatDelay, texts } = optsRef.current
 
-    const controls = animate(sweepPos, SWEEP_END, {
-      duration,
-      delay,
-      ease: sweepEase,
-      onComplete() {
-        if (!repeat) return
-        timerRef.current = setTimeout(() => {
-          setActiveIndex((current) => (current + 1) % texts.length)
-          playAnimation()
-        }, repeatDelay * 1000)
-      },
-    })
+      sweepPos.set(SWEEP_START)
 
-    stopRef.current = () => controls.stop()
-  }, [delay, duration, repeat, repeatDelay, sweepPos, texts])
+      const controls = animate(sweepPos, SWEEP_END, {
+        duration,
+        delay,
+        ease: sweepEase,
+        onComplete() {
+          if (!repeat) return
+          timerRef.current = setTimeout(() => {
+            const next = (indexRef.current + 1) % texts.length
+            indexRef.current = next
+            setActiveIndex(next)
+            playRef.current()
+          }, repeatDelay * 1000)
+        },
+      })
+
+      stopRef.current = () => controls.stop()
+    }
+  }, [sweepPos])
 
   useEffect(() => {
     if (prefersReducedMotion) {
@@ -190,13 +220,13 @@ export function DiaTextReveal({
     if (startOnView && !isInView) return
     if (once && hasPlayedRef.current) return
     hasPlayedRef.current = true
-    play()
+    playRef.current()
 
     return () => {
       stopRef.current?.()
       clearTimeout(timerRef.current)
     }
-  }, [isInView, once, play, prefersReducedMotion, startOnView, sweepPos])
+  }, [isInView, startOnView, once, prefersReducedMotion, sweepPos])
 
   const fixedW =
     isMulti && fixedWidth && measuredWidths.length > 0

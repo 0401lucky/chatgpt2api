@@ -6,6 +6,7 @@ from threading import Event, Thread
 from fastapi import HTTPException, Request
 
 from services.account_service import account_service
+from services.auth_service import auth_service
 from services.config import config
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -19,10 +20,30 @@ def extract_bearer_token(authorization: str | None) -> str:
     return value.strip()
 
 
-def require_auth_key(authorization: str | None) -> None:
+def _legacy_admin_identity(token: str) -> dict[str, object] | None:
     auth_key = str(config.auth_key or "").strip()
-    if not auth_key or extract_bearer_token(authorization) != auth_key:
+    if auth_key and token == auth_key:
+        return {"id": "admin", "name": "管理员", "role": "admin"}
+    return None
+
+
+def require_identity(authorization: str | None) -> dict[str, object]:
+    token = extract_bearer_token(authorization)
+    identity = _legacy_admin_identity(token) or auth_service.authenticate(token)
+    if identity is None:
         raise HTTPException(status_code=401, detail={"error": "authorization is invalid"})
+    return identity
+
+
+def require_auth_key(authorization: str | None) -> None:
+    require_identity(authorization)
+
+
+def require_admin(authorization: str | None) -> dict[str, object]:
+    identity = require_identity(authorization)
+    if identity.get("role") != "admin":
+        raise HTTPException(status_code=403, detail={"error": "admin permission required"})
+    return identity
 
 
 def resolve_image_base_url(request: Request) -> str:

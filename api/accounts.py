@@ -4,8 +4,10 @@ from fastapi import APIRouter, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
+from services.auth_service import auth_service
+
 from api.support import (
-    require_auth_key,
+    require_admin,
     sanitize_cpa_pool,
     sanitize_cpa_pools,
     sanitize_sub2api_server,
@@ -19,6 +21,16 @@ from services.sub2api_service import (
     sub2api_config,
     sub2api_import_service,
 )
+
+
+
+class UserKeyCreateRequest(BaseModel):
+    name: str = ""
+
+
+class UserKeyUpdateRequest(BaseModel):
+    name: str | None = None
+    enabled: bool | None = None
 
 
 class AccountCreateRequest(BaseModel):
@@ -84,14 +96,54 @@ class Sub2APIImportRequest(BaseModel):
 def create_router() -> APIRouter:
     router = APIRouter()
 
+    @router.get("/api/auth/users")
+    async def list_user_keys(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"items": auth_service.list_keys(role="user")}
+
+    @router.post("/api/auth/users")
+    async def create_user_key(body: UserKeyCreateRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        item, raw_key = auth_service.create_key(role="user", name=body.name)
+        return {"item": item, "key": raw_key, "items": auth_service.list_keys(role="user")}
+
+    @router.post("/api/auth/users/{key_id}")
+    async def update_user_key(
+            key_id: str,
+            body: UserKeyUpdateRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        updates = {
+            key: value
+            for key, value in {
+                "name": body.name,
+                "enabled": body.enabled,
+            }.items()
+            if value is not None
+        }
+        if not updates:
+            raise HTTPException(status_code=400, detail={"error": "no updates provided"})
+        item = auth_service.update_key(key_id, updates, role="user")
+        if item is None:
+            raise HTTPException(status_code=404, detail={"error": "user key not found"})
+        return {"item": item, "items": auth_service.list_keys(role="user")}
+
+    @router.delete("/api/auth/users/{key_id}")
+    async def delete_user_key(key_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        if not auth_service.delete_key(key_id, role="user"):
+            raise HTTPException(status_code=404, detail={"error": "user key not found"})
+        return {"items": auth_service.list_keys(role="user")}
+
     @router.get("/api/accounts")
     async def get_accounts(authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         return {"items": account_service.list_accounts()}
 
     @router.post("/api/accounts")
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
@@ -106,7 +158,7 @@ def create_router() -> APIRouter:
 
     @router.delete("/api/accounts")
     async def delete_accounts(body: AccountDeleteRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         account_ids = [str(account_id or "").strip() for account_id in body.account_ids if str(account_id or "").strip()]
         if tokens:
@@ -119,7 +171,7 @@ def create_router() -> APIRouter:
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         access_tokens = [str(token or "").strip() for token in body.access_tokens if str(token or "").strip()]
         account_ids = [str(account_id or "").strip() for account_id in body.account_ids if str(account_id or "").strip()]
         if not access_tokens and account_ids:
@@ -132,7 +184,7 @@ def create_router() -> APIRouter:
 
     @router.post("/api/accounts/update")
     async def update_account(body: AccountUpdateRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         access_token = str(body.access_token or "").strip()
         account_id = str(body.account_id or "").strip()
         if not access_token and not account_id:
@@ -147,12 +199,12 @@ def create_router() -> APIRouter:
 
     @router.get("/api/cpa/pools")
     async def list_cpa_pools(authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         return {"pools": sanitize_cpa_pools(cpa_config.list_pools())}
 
     @router.post("/api/cpa/pools")
     async def create_cpa_pool(body: CPAPoolCreateRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         if not body.base_url.strip():
             raise HTTPException(status_code=400, detail={"error": "base_url is required"})
         if not body.secret_key.strip():
@@ -162,7 +214,7 @@ def create_router() -> APIRouter:
 
     @router.post("/api/cpa/pools/{pool_id}")
     async def update_cpa_pool(pool_id: str, body: CPAPoolUpdateRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         pool = cpa_config.update_pool(pool_id, body.model_dump(exclude_none=True))
         if pool is None:
             raise HTTPException(status_code=404, detail={"error": "pool not found"})
@@ -170,14 +222,14 @@ def create_router() -> APIRouter:
 
     @router.delete("/api/cpa/pools/{pool_id}")
     async def delete_cpa_pool(pool_id: str, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         if not cpa_config.delete_pool(pool_id):
             raise HTTPException(status_code=404, detail={"error": "pool not found"})
         return {"pools": sanitize_cpa_pools(cpa_config.list_pools())}
 
     @router.get("/api/cpa/pools/{pool_id}/files")
     async def cpa_pool_files(pool_id: str, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         pool = cpa_config.get_pool(pool_id)
         if pool is None:
             raise HTTPException(status_code=404, detail={"error": "pool not found"})
@@ -185,7 +237,7 @@ def create_router() -> APIRouter:
 
     @router.post("/api/cpa/pools/{pool_id}/import")
     async def cpa_pool_import(pool_id: str, body: CPAImportRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         pool = cpa_config.get_pool(pool_id)
         if pool is None:
             raise HTTPException(status_code=404, detail={"error": "pool not found"})
@@ -197,7 +249,7 @@ def create_router() -> APIRouter:
 
     @router.get("/api/cpa/pools/{pool_id}/import")
     async def cpa_pool_import_progress(pool_id: str, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         pool = cpa_config.get_pool(pool_id)
         if pool is None:
             raise HTTPException(status_code=404, detail={"error": "pool not found"})
@@ -205,12 +257,12 @@ def create_router() -> APIRouter:
 
     @router.get("/api/sub2api/servers")
     async def list_sub2api_servers(authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         return {"servers": sanitize_sub2api_servers(sub2api_config.list_servers())}
 
     @router.post("/api/sub2api/servers")
     async def create_sub2api_server(body: Sub2APIServerCreateRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         if not body.base_url.strip():
             raise HTTPException(status_code=400, detail={"error": "base_url is required"})
         has_login = body.email.strip() and body.password.strip()
@@ -229,7 +281,7 @@ def create_router() -> APIRouter:
 
     @router.post("/api/sub2api/servers/{server_id}")
     async def update_sub2api_server(server_id: str, body: Sub2APIServerUpdateRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         server = sub2api_config.update_server(server_id, body.model_dump(exclude_none=True))
         if server is None:
             raise HTTPException(status_code=404, detail={"error": "server not found"})
@@ -237,14 +289,14 @@ def create_router() -> APIRouter:
 
     @router.delete("/api/sub2api/servers/{server_id}")
     async def delete_sub2api_server(server_id: str, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         if not sub2api_config.delete_server(server_id):
             raise HTTPException(status_code=404, detail={"error": "server not found"})
         return {"servers": sanitize_sub2api_servers(sub2api_config.list_servers())}
 
     @router.get("/api/sub2api/servers/{server_id}/groups")
     async def sub2api_server_groups(server_id: str, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
             raise HTTPException(status_code=404, detail={"error": "server not found"})
@@ -256,7 +308,7 @@ def create_router() -> APIRouter:
 
     @router.get("/api/sub2api/servers/{server_id}/accounts")
     async def sub2api_server_accounts(server_id: str, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
             raise HTTPException(status_code=404, detail={"error": "server not found"})
@@ -268,7 +320,7 @@ def create_router() -> APIRouter:
 
     @router.post("/api/sub2api/servers/{server_id}/import")
     async def sub2api_server_import(server_id: str, body: Sub2APIImportRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
             raise HTTPException(status_code=404, detail={"error": "server not found"})
@@ -280,7 +332,7 @@ def create_router() -> APIRouter:
 
     @router.get("/api/sub2api/servers/{server_id}/import")
     async def sub2api_server_import_progress(server_id: str, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
             raise HTTPException(status_code=404, detail={"error": "server not found"})

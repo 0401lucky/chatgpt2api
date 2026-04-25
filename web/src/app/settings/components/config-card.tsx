@@ -17,7 +17,6 @@ export function ConfigCard() {
   const config = useSettingsStore((state) => state.config);
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
-  const setAuthKey = useSettingsStore((state) => state.setAuthKey);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
@@ -59,17 +58,10 @@ export function ConfigCard() {
   return (
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
       <CardContent className="space-y-4 p-6">
+        <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm leading-6 text-stone-600">
+          管理员登录密钥继续从部署配置读取，不再在此页面展示；如需分发给其他人，请在下方创建普通用户密钥。
+        </div>
         <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">登录密钥</label>
-            <Input
-              value={String(config?.["auth-key"] || "")}
-              onChange={(event) => setAuthKey(event.target.value)}
-              placeholder="auth-key"
-              className="h-10 rounded-xl border-stone-200 bg-white"
-            />
-            <p className="text-xs text-stone-500">用于后台登录验证。</p>
-          </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">账号刷新间隔</label>
             <Input

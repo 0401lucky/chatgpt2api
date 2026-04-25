@@ -21,12 +21,14 @@ class GitStorageBackend(StorageBackend):
         token: str,
         branch: str = "main",
         file_path: str = "accounts.json",
+        auth_keys_file_path: str = "auth_keys.json",
         local_cache_dir: Path | None = None,
     ):
         self.repo_url = repo_url
         self.token = token
         self.branch = branch
         self.file_path = file_path
+        self.auth_keys_file_path = auth_keys_file_path
         
         # 本地缓存目录
         if local_cache_dir is None:
@@ -83,14 +85,7 @@ class GitStorageBackend(StorageBackend):
     def load_accounts(self) -> list[dict[str, Any]]:
         """从 Git 仓库加载账号数据"""
         try:
-            repo = self._clone_or_pull()
-            file_full_path = Path(repo.working_dir) / self.file_path
-            
-            if not file_full_path.exists():
-                return []
-            
-            data = json.loads(file_full_path.read_text(encoding="utf-8"))
-            return data if isinstance(data, list) else []
+            return self._load_json_file(self.file_path)
         except Exception as e:
             print(f"[git-storage] load failed: {e}")
             raise
@@ -98,29 +93,53 @@ class GitStorageBackend(StorageBackend):
     def save_accounts(self, accounts: list[dict[str, Any]]) -> None:
         """保存账号数据到 Git 仓库"""
         try:
-            repo = self._clone_or_pull()
-            file_full_path = Path(repo.working_dir) / self.file_path
-            
-            # 确保目录存在
-            file_full_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 写入文件
-            file_full_path.write_text(
-                json.dumps(accounts, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            
-            # 提交并推送
-            repo.index.add([self.file_path])
-            
-            # 检查是否有变更
-            if repo.is_dirty():
-                repo.index.commit("Update accounts data")
-                origin = repo.remote("origin")
-                origin.push(self.branch)
+            self._save_json_file(self.file_path, accounts, "Update accounts data")
         except Exception as e:
             print(f"[git-storage] save failed: {e}")
             raise e
+
+    def load_auth_keys(self) -> list[dict[str, Any]]:
+        """从 Git 仓库加载鉴权密钥数据"""
+        try:
+            data = self._load_json_value(self.auth_keys_file_path)
+            if isinstance(data, dict):
+                data = data.get("items")
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            print(f"[git-storage] load failed: {e}")
+            raise
+
+    def save_auth_keys(self, auth_keys: list[dict[str, Any]]) -> None:
+        """保存鉴权密钥数据到 Git 仓库"""
+        try:
+            self._save_json_file(self.auth_keys_file_path, {"items": auth_keys}, "Update auth keys data")
+        except Exception as e:
+            print(f"[git-storage] save failed: {e}")
+            raise e
+
+    def _load_json_file(self, file_path: str) -> list[dict[str, Any]]:
+        data = self._load_json_value(file_path)
+        return data if isinstance(data, list) else []
+
+    def _load_json_value(self, file_path: str) -> Any:
+        repo = self._clone_or_pull()
+        file_full_path = Path(repo.working_dir) / file_path
+        if not file_full_path.exists():
+            return None
+        return json.loads(file_full_path.read_text(encoding="utf-8"))
+
+    def _save_json_file(self, file_path: str, items: Any, message: str) -> None:
+        repo = self._clone_or_pull()
+        file_full_path = Path(repo.working_dir) / file_path
+        file_full_path.parent.mkdir(parents=True, exist_ok=True)
+        file_full_path.write_text(
+            json.dumps(items, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        repo.index.add([file_path])
+        if repo.is_dirty():
+            repo.index.commit(message)
+            repo.remote("origin").push(self.branch)
 
     def health_check(self) -> dict[str, Any]:
         """健康检查"""
@@ -132,6 +151,7 @@ class GitStorageBackend(StorageBackend):
                 "repo_url": self._mask_token(self.repo_url),
                 "branch": self.branch,
                 "file_path": self.file_path,
+                "auth_keys_file_path": self.auth_keys_file_path,
                 "last_commit": repo.head.commit.hexsha[:8],
             }
         except Exception as e:
@@ -149,6 +169,7 @@ class GitStorageBackend(StorageBackend):
             "repo_url": self._mask_token(self.repo_url),
             "branch": self.branch,
             "file_path": self.file_path,
+            "auth_keys_file_path": self.auth_keys_file_path,
         }
 
     @staticmethod

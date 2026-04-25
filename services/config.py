@@ -136,7 +136,9 @@ class ConfigStore:
         return value or "0.0.0"
 
     def get(self) -> dict[str, object]:
-        return dict(self.data)
+        data = dict(self.data)
+        data.pop("auth-key", None)
+        return data
 
     def get_proxy_settings(self) -> str:
         return str(self.data.get("proxy") or "").strip()
@@ -144,8 +146,6 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
-        if _is_invalid_auth_key(next_data.get("auth-key")):
-            next_data["auth-key"] = self.data.get("auth-key") or os.getenv("CHATGPT2API_AUTH_KEY") or ""
         self.data = next_data
         self._save()
         return self.get()

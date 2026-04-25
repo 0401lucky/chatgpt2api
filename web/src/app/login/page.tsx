@@ -9,12 +9,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { login } from "@/lib/api";
-import { setStoredAuthKey } from "@/store/auth";
+import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
+import { getDefaultRouteForRole, setStoredAuthSession } from "@/store/auth";
 
 export default function LoginPage() {
   const router = useRouter();
   const [authKey, setAuthKey] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const { isCheckingAuth } = useRedirectIfAuthenticated();
 
   const handleLogin = async () => {
     const normalizedAuthKey = authKey.trim();
@@ -25,9 +27,14 @@ export default function LoginPage() {
 
     setIsSubmitting(true);
     try {
-      await login(normalizedAuthKey);
-      await setStoredAuthKey(normalizedAuthKey);
-      router.replace("/accounts");
+      const data = await login(normalizedAuthKey);
+      await setStoredAuthSession({
+        key: normalizedAuthKey,
+        role: data.role,
+        subjectId: data.subject_id,
+        name: data.name,
+      });
+      router.replace(getDefaultRouteForRole(data.role));
     } catch (error) {
       const message = error instanceof Error ? error.message : "登录失败";
       toast.error(message);
@@ -35,6 +42,14 @@ export default function LoginPage() {
       setIsSubmitting(false);
     }
   };
+
+  if (isCheckingAuth) {
+    return (
+      <div className="grid min-h-[calc(100vh-1rem)] w-full place-items-center px-4 py-6">
+        <LoaderCircle className="size-5 animate-spin text-stone-400" />
+      </div>
+    );
+  }
 
   return (
     <div className="grid min-h-[calc(100vh-1rem)] w-full place-items-center px-4 py-6">

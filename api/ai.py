@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import FormData, UploadFile
 
-from api.support import raise_image_quota_error, require_auth_key, resolve_image_base_url
+from api.support import raise_image_quota_error, require_identity, resolve_image_base_url
 from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService, ImageGenerationError
 from services.image_history_service import image_history_service
@@ -181,7 +181,7 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
 
     @router.get("/v1/models")
     async def list_models(authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_identity(authorization)
         try:
             return await run_in_threadpool(chatgpt_service.list_models)
         except Exception as exc:
@@ -193,7 +193,7 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
             request: Request,
             authorization: str | None = Header(default=None),
     ):
-        require_auth_key(authorization)
+        require_identity(authorization)
         base_url = resolve_image_base_url(request)
         if body.stream:
             try:
@@ -228,7 +228,7 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
             request: Request,
             authorization: str | None = Header(default=None),
     ):
-        require_auth_key(authorization)
+        require_identity(authorization)
         prompt, model, n, size, response_format, stream, images = await _parse_image_edit_request(request)
         base_url = resolve_image_base_url(request)
         if stream:
@@ -256,7 +256,7 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
 
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_identity(authorization)
         payload = body.model_dump(mode="python")
         if bool(payload.get("stream")):
             if is_image_chat_request(payload):
@@ -272,7 +272,7 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
 
     @router.post("/v1/responses")
     async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_identity(authorization)
         payload = body.model_dump(mode="python")
         if bool(payload.get("stream")):
             return StreamingResponse(
@@ -283,7 +283,7 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
 
     @router.get("/api/image-history")
     async def get_image_history(authorization: str | None = Header(default=None)):
-        require_auth_key(authorization)
+        require_identity(authorization)
         return {"items": image_history_service.list_records()}
 
     @router.get("/api/image-history/{record_id}/images/{image_id}")
@@ -292,7 +292,7 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
         image_id: str,
         authorization: str | None = Header(default=None),
     ):
-        require_auth_key(authorization)
+        require_identity(authorization)
         image_entry = image_history_service.get_image_entry(record_id, image_id)
         if image_entry is None:
             raise HTTPException(status_code=404, detail={"error": "image not found"})
@@ -309,7 +309,7 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
         body: ImageHistoryDeleteRequest,
         authorization: str | None = Header(default=None),
     ):
-        require_auth_key(authorization)
+        require_identity(authorization)
         delete_items = body.model_dump(mode="python").get("items") or []
         if not delete_items:
             raise HTTPException(status_code=404, detail={"error": "images not found"})

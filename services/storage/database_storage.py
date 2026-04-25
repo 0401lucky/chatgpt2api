@@ -21,6 +21,15 @@ class AccountModel(Base):
     data = Column(Text, nullable=False)  # JSON 格式存储完整账号数据
 
 
+class AuthKeyModel(Base):
+    """鉴权密钥数据模型"""
+    __tablename__ = "auth_keys"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key_id = Column(String(255), unique=True, nullable=False, index=True)
+    data = Column(Text, nullable=False)
+
+
 class DatabaseStorageBackend(StorageBackend):
     """数据库存储后端（支持 SQLite、PostgreSQL、MySQL 等）"""
 
@@ -52,25 +61,53 @@ class DatabaseStorageBackend(StorageBackend):
 
     def save_accounts(self, accounts: list[dict[str, Any]]) -> None:
         """保存账号数据到数据库"""
+        self._save_rows(AccountModel, accounts, "access_token")
+
+    def load_auth_keys(self) -> list[dict[str, Any]]:
+        """从数据库加载鉴权密钥数据"""
+        return self._load_rows(AuthKeyModel)
+
+    def save_auth_keys(self, auth_keys: list[dict[str, Any]]) -> None:
+        """保存鉴权密钥数据到数据库"""
+        self._save_rows(AuthKeyModel, auth_keys, "id", "key_id")
+
+    def _load_rows(self, model: type[AccountModel] | type[AuthKeyModel]) -> list[dict[str, Any]]:
         session = self.Session()
         try:
-            # 清空现有数据
-            session.query(AccountModel).delete()
-            
-            # 插入新数据
-            for account in accounts:
-                if not isinstance(account, dict):
+            items = []
+            for row in session.query(model).all():
+                try:
+                    item_data = json.loads(row.data)
+                    if isinstance(item_data, dict):
+                        items.append(item_data)
+                except json.JSONDecodeError:
                     continue
-                access_token = str(account.get("access_token") or "").strip()
-                if not access_token:
+            return items
+        finally:
+            session.close()
+
+    def _save_rows(
+        self,
+        model: type[AccountModel] | type[AuthKeyModel],
+        items: list[dict[str, Any]],
+        source_key: str,
+        target_key: str | None = None,
+    ) -> None:
+        session = self.Session()
+        try:
+            session.query(model).delete()
+            for item in items:
+                if not isinstance(item, dict):
                     continue
-                
-                account_model = AccountModel(
-                    access_token=access_token,
-                    data=json.dumps(account, ensure_ascii=False),
+                key_value = str(item.get(source_key) or "").strip()
+                if not key_value:
+                    continue
+                session.add(
+                    model(
+                        **{target_key or source_key: key_value},
+                        data=json.dumps(item, ensure_ascii=False),
+                    )
                 )
-                session.add(account_model)
-            
             session.commit()
         except Exception as e:
             session.rollback()
@@ -86,11 +123,13 @@ class DatabaseStorageBackend(StorageBackend):
                 # 尝试执行简单查询
                 session.execute(text("SELECT 1"))
                 count = session.query(AccountModel).count()
+                auth_key_count = session.query(AuthKeyModel).count()
                 return {
                     "status": "healthy",
                     "backend": "database",
                     "database_url": self._mask_password(self.database_url),
                     "account_count": count,
+                    "auth_key_count": auth_key_count,
                 }
             finally:
                 session.close()

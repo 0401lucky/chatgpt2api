@@ -15,6 +15,7 @@ type ImageSidebarProps = {
   onSelectConversation: (id: string) => void;
   onDeleteConversation: (id: string) => void | Promise<void>;
   formatConversationTime: (value: string) => string;
+  hideActionButtons?: boolean;
 };
 
 export function ImageSidebar({
@@ -26,24 +27,27 @@ export function ImageSidebar({
   onSelectConversation,
   onDeleteConversation,
   formatConversationTime,
+  hideActionButtons = false,
 }: ImageSidebarProps) {
   return (
-    <aside className="min-h-0 border-r border-stone-200/70 pr-3">
-      <div className="flex h-full min-h-0 flex-col gap-3 py-2">
-        <div className="flex items-center gap-2">
-          <Button className="h-10 flex-1 rounded-xl bg-stone-950 text-white hover:bg-stone-800" onClick={onCreateDraft}>
-            <MessageSquarePlus className="size-4" />
-            新建对话
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/85 px-3 text-stone-600 hover:bg-white"
-            onClick={() => void onClearHistory()}
-            disabled={conversations.length === 0}
-          >
-            <Trash2 className="size-4" />
-          </Button>
-        </div>
+    <aside className="min-h-0">
+      <div className="flex h-full min-h-0 flex-col gap-2 py-1 sm:gap-3 sm:py-2">
+        {!hideActionButtons && (
+          <div className="flex items-center gap-2">
+            <Button className="h-10 flex-1 rounded-xl bg-stone-950 text-white hover:bg-stone-800" onClick={onCreateDraft}>
+              <MessageSquarePlus className="size-4" />
+              新建对话
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/85 px-3 text-stone-600 hover:bg-white"
+              onClick={() => void onClearHistory()}
+              disabled={conversations.length === 0}
+            >
+              <Trash2 className="size-4" />
+            </Button>
+          </div>
+        )}
 
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
           {isLoadingHistory ? (
@@ -58,10 +62,10 @@ export function ImageSidebar({
               const active = conversation.id === selectedConversationId;
               const stats = getImageConversationStats(conversation);
               return (
-                <div
-                  key={conversation.id}
-                  className={cn(
-                    "group relative w-full border-l-2 px-3 py-3 text-left transition",
+                  <div
+                    key={conversation.id}
+                    className={cn(
+                      "group relative w-full border-l-2 px-3 py-2 text-left transition sm:py-3",
                     active
                       ? "border-stone-900 bg-black/[0.03] text-stone-950"
                       : "border-transparent text-stone-700 hover:border-stone-300 hover:bg-white/40",

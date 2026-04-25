@@ -6,7 +6,6 @@ import unittest
 
 import requests
 
-from test.integration_guard import requires_integration
 from test.utils import save_image
 
 AUTH_KEY = "chatgpt2api"
@@ -16,7 +15,6 @@ IMAGE_MODEL = "gpt-image-1"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 
 
-@requires_integration
 class ResponsesTests(unittest.TestCase):
     @staticmethod
     def _iter_sse_payloads(response: requests.Response):

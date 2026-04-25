@@ -29,6 +29,7 @@ class _FakeChatGPTService:
         source_endpoint: str,
         response_format: str = "b64_json",
         base_url: str | None = None,
+        size: str | None = None,
     ):
         normalized_images = list(images)
         type(self).last_call = {
@@ -39,6 +40,7 @@ class _FakeChatGPTService:
             "source_endpoint": source_endpoint,
             "response_format": response_format,
             "base_url": base_url,
+            "size": size,
         }
         return {
             "created": 123,

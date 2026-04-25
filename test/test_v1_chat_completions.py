@@ -6,14 +6,12 @@ import unittest
 
 import requests
 
-from test.integration_guard import requires_integration
 from utils.helper import save_images_from_text
 
 AUTH_KEY = "chatgpt2api"
 BASE_URL = "http://localhost:8000"
 
 
-@requires_integration
 class ChatCompletionsTests(unittest.TestCase):
     def test_text_completion_http(self):
         """测试文本对话的非流式 HTTP 调用。"""

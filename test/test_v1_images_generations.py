@@ -6,14 +6,12 @@ import unittest
 
 import requests
 
-from test.integration_guard import requires_integration
 from test.utils import save_image
 
 AUTH_KEY = "chatgpt2api"
 BASE_URL = "http://localhost:8000"
 
 
-@requires_integration
 class ImageGenerationsTests(unittest.TestCase):
     def test_image_generation_http(self):
         """测试图片生成的非流式 HTTP 调用。"""

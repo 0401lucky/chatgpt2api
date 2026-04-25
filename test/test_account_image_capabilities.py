@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 import shutil
@@ -38,6 +39,20 @@ class AccountCapabilityTests(unittest.TestCase):
         service = AccountService(tmp_dir / "accounts.json")
         self.assertEqual(service._normalize_account_type("prolite"), "ProLite")
         self.assertEqual(service._normalize_account_type("pro_lite"), "ProLite")
+
+    def test_search_account_type_ignores_unrelated_scalar_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(Path(tmp_dir) / "accounts.json")
+            self.assertIsNone(
+                service._search_account_type(
+                    {
+                        "amr": ["pwd", "otp", "mfa"],
+                        "chatgpt_compute_residency": "no_constraint",
+                        "chatgpt_data_residency": "no_constraint",
+                        "user_id": "user-I52GFfLGFM0dokFk2dBiKEBn",
+                    }
+                )
+            )
 
     def test_mark_image_result_does_not_consume_unknown_quota(self) -> None:
         tmp_dir = self._make_temp_dir()

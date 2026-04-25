@@ -3,6 +3,7 @@
 import { Clock3, LoaderCircle, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import type { ImageConversation, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
 
 export type ImageLightboxItem = {
@@ -161,9 +162,17 @@ export function ImageResults({
                       return (
                         <div
                           key={image.id}
-                          className="break-inside-avoid overflow-hidden border border-rose-200 bg-rose-50"
+                          className={cn(
+                            "break-inside-avoid overflow-hidden border border-rose-200 bg-rose-50",
+                            turn.size === "1:1" && "aspect-square",
+                            turn.size === "16:9" && "aspect-video",
+                            turn.size === "9:16" && "aspect-[9/16]",
+                            turn.size === "4:3" && "aspect-[4/3]",
+                            turn.size === "3:4" && "aspect-[3/4]",
+                            !["1:1", "16:9", "9:16", "4:3", "3:4"].includes(turn.size) && "aspect-square",
+                          )}
                         >
-                          <div className="flex min-h-[320px] items-center justify-center px-6 py-8 text-center text-sm leading-6 text-rose-600">
+                          <div className="flex h-full items-center justify-center px-6 py-8 text-center text-sm leading-6 text-rose-600">
                             {image.error || "生成失败"}
                           </div>
                         </div>
@@ -173,9 +182,17 @@ export function ImageResults({
                     return (
                       <div
                         key={image.id}
-                        className="break-inside-avoid overflow-hidden border border-stone-200/80 bg-stone-100/80"
+                        className={cn(
+                          "break-inside-avoid overflow-hidden border border-stone-200/80 bg-stone-100/80",
+                          turn.size === "1:1" && "aspect-square",
+                          turn.size === "16:9" && "aspect-video",
+                          turn.size === "9:16" && "aspect-[9/16]",
+                          turn.size === "4:3" && "aspect-[4/3]",
+                          turn.size === "3:4" && "aspect-[3/4]",
+                          !["1:1", "16:9", "9:16", "4:3", "3:4"].includes(turn.size) && "aspect-square",
+                        )}
                       >
-                        <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 px-6 py-8 text-center text-stone-500">
+                        <div className="flex h-full flex-col items-center justify-center gap-3 px-6 py-8 text-center text-stone-500">
                           <div className="rounded-full bg-white p-3 shadow-sm">
                             {turn.status === "queued" ? (
                               <Clock3 className="size-5" />

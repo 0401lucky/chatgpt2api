@@ -25,16 +25,25 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# 安装 Git / PostgreSQL 客户端依赖，兼容新的存储后端。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    libpq-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY main.py ./
+COPY config.json ./
 COPY VERSION ./
 COPY api ./api
 COPY services ./services
 COPY utils ./utils
+COPY scripts ./scripts
 COPY --from=web-build /app/web/out ./web_dist
 
 EXPOSE 80

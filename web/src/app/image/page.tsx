@@ -1,13 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { History, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ImageComposer } from "@/app/image/components/image-composer";
 import { ImageResults, type ImageLightboxItem } from "@/app/image/components/image-results";
 import { ImageSidebar } from "@/app/image/components/image-sidebar";
 import { ImageLightbox } from "@/components/image-lightbox";
-import { editImage, fetchAccounts, generateImage, type Account } from "@/lib/api";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { editImage, fetchAccounts, generateImage, type Account, type ImageModel } from "@/lib/api";
 import {
   clearImageConversations,
   deleteImageConversation,
@@ -23,6 +31,7 @@ import {
 } from "@/store/image-conversations";
 
 const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_id";
+const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
 const activeConversationQueueIds = new Set<string>();
 
 function buildConversationTitle(prompt: string) {
@@ -169,8 +178,11 @@ export default function ImagePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [imagePrompt, setImagePrompt] = useState("");
+  const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
   const [imageCount, setImageCount] = useState("1");
   const [imageMode, setImageMode] = useState<ImageConversationMode>("generate");
+  const [imageSize, setImageSize] = useState("");
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [referenceImageFiles, setReferenceImageFiles] = useState<File[]>([]);
   const [referenceImages, setReferenceImages] = useState<StoredReferenceImage[]>([]);
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
@@ -204,6 +216,9 @@ export default function ImagePage() {
 
     const loadHistory = async () => {
       try {
+        const storedSize = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY) : null;
+        setImageSize(storedSize || "");
+
         const items = await listImageConversations();
         const normalizedItems = await recoverConversationHistory(items);
         if (cancelled) {
@@ -283,6 +298,18 @@ export default function ImagePage() {
       window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
     }
   }, [selectedConversationId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (imageSize) {
+      window.localStorage.setItem(IMAGE_SIZE_STORAGE_KEY, imageSize);
+      return;
+    }
+    window.localStorage.removeItem(IMAGE_SIZE_STORAGE_KEY);
+  }, [imageSize]);
 
   useEffect(() => {
     if (selectedConversationId && !conversations.some((conversation) => conversation.id === selectedConversationId)) {
@@ -524,8 +551,8 @@ export default function ImagePage() {
           try {
             const data =
               queuedTurn.mode === "edit"
-                ? await editImage(referenceFiles, queuedTurn.prompt)
-                : await generateImage(queuedTurn.prompt);
+                ? await editImage(referenceFiles, queuedTurn.prompt, queuedTurn.model, queuedTurn.size)
+                : await generateImage(queuedTurn.prompt, queuedTurn.model, queuedTurn.size);
             const first = data.data?.[0];
             if (!first?.b64_json) {
               throw new Error("未返回图片数据");
@@ -687,10 +714,11 @@ export default function ImagePage() {
     const draftTurn: ImageTurn = {
       id: turnId,
       prompt,
-      model: "auto",
+      model: imageModel,
       mode: imageMode,
       referenceImages: imageMode === "edit" ? referenceImages : [],
       count: parsedCount,
+      size: imageSize,
       images: Array.from({ length: parsedCount }, (_, index) => ({
         id: `${turnId}-${index}`,
         status: "loading" as const,
@@ -732,18 +760,76 @@ export default function ImagePage() {
   return (
     <>
       <section className="mx-auto grid h-[calc(100vh-5rem)] min-h-0 w-full max-w-[1380px] grid-cols-1 gap-3 px-3 pb-6 lg:grid-cols-[240px_minmax(0,1fr)]">
-        <ImageSidebar
-          conversations={conversations}
-          isLoadingHistory={isLoadingHistory}
-          selectedConversationId={selectedConversationId}
-          onCreateDraft={handleCreateDraft}
-          onClearHistory={handleClearHistory}
-          onSelectConversation={setSelectedConversationId}
-          onDeleteConversation={handleDeleteConversation}
-          formatConversationTime={formatConversationTime}
-        />
+        <div className="hidden h-full min-h-0 border-r border-stone-200/70 pr-3 lg:block">
+          <ImageSidebar
+            conversations={conversations}
+            isLoadingHistory={isLoadingHistory}
+            selectedConversationId={selectedConversationId}
+            onCreateDraft={handleCreateDraft}
+            onClearHistory={handleClearHistory}
+            onSelectConversation={setSelectedConversationId}
+            onDeleteConversation={handleDeleteConversation}
+            formatConversationTime={formatConversationTime}
+          />
+        </div>
 
-        <div className="flex min-h-0 flex-col gap-4">
+        <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
+          <DialogContent className="flex h-[80vh] w-[92vw] max-w-[420px] flex-col overflow-hidden rounded-[32px] border-stone-200 bg-white p-0 shadow-2xl">
+            <DialogHeader className="px-6 pt-6 pb-2">
+              <DialogTitle className="flex items-center gap-2 text-lg font-bold">
+                <History className="size-5" />
+                历史记录
+              </DialogTitle>
+            </DialogHeader>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-8">
+              <ImageSidebar
+                conversations={conversations}
+                isLoadingHistory={isLoadingHistory}
+                selectedConversationId={selectedConversationId}
+                onCreateDraft={() => {
+                  handleCreateDraft();
+                  setIsHistoryOpen(false);
+                }}
+                onClearHistory={handleClearHistory}
+                onSelectConversation={(id) => {
+                  setSelectedConversationId(id);
+                  setIsHistoryOpen(false);
+                }}
+                onDeleteConversation={handleDeleteConversation}
+                formatConversationTime={formatConversationTime}
+                hideActionButtons
+              />
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        <div className="flex min-h-0 flex-col gap-3 sm:gap-4">
+          <div className="flex items-center justify-between gap-3 lg:hidden">
+            <Button
+              variant="outline"
+              className="h-10 flex-1 rounded-2xl border-stone-200 bg-white/85 text-stone-700 shadow-sm"
+              onClick={() => setIsHistoryOpen(true)}
+            >
+              <History className="mr-2 size-4" />
+              历史记录 ({conversations.length})
+            </Button>
+            <Button
+              className="h-10 rounded-2xl bg-stone-950 text-white shadow-sm"
+              onClick={handleCreateDraft}
+            >
+              <Plus className="size-4" />
+              新建
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-2xl border-stone-200 bg-white/85 px-3 text-stone-600 shadow-sm"
+              onClick={() => void handleClearHistory()}
+              disabled={conversations.length === 0}
+            >
+              <Trash2 className="size-4" />
+            </Button>
+          </div>
+
           <div
             ref={resultsViewportRef}
             className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-2 py-3 sm:px-4 sm:py-4"
@@ -759,7 +845,9 @@ export default function ImagePage() {
           <ImageComposer
             mode={imageMode}
             prompt={imagePrompt}
+            model={imageModel}
             imageCount={imageCount}
+            imageSize={imageSize}
             availableQuota={availableQuota}
             activeTaskCount={activeTaskCount}
             referenceImages={referenceImages}
@@ -767,7 +855,9 @@ export default function ImagePage() {
             fileInputRef={fileInputRef}
             onModeChange={setImageMode}
             onPromptChange={setImagePrompt}
+            onModelChange={setImageModel}
             onImageCountChange={setImageCount}
+            onImageSizeChange={setImageSize}
             onSubmit={handleSubmit}
             onPickReferenceImage={() => fileInputRef.current?.click()}
             onReferenceImageChange={handleReferenceImageChange}

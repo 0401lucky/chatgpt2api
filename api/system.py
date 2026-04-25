@@ -47,5 +47,14 @@ def create_router(app_version: str) -> APIRouter:
             raise HTTPException(status_code=400, detail={"error": "proxy url is required"})
         return {"result": await run_in_threadpool(test_proxy, candidate)}
 
+    @router.get("/api/storage/info")
+    async def get_storage_info(authorization: str | None = Header(default=None)):
+        require_auth_key(authorization)
+        storage = config.get_storage_backend()
+        return {
+            "backend": storage.get_backend_info(),
+            "health": storage.health_check(),
+        }
+
     return router
 

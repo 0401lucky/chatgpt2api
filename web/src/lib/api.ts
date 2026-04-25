@@ -2,7 +2,7 @@ import { blobRequest, httpRequest } from "@/lib/request";
 
 export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
-export type ImageModel = "auto" | "gpt-image-1" | "gpt-image-2";
+export type ImageModel = "auto" | "gpt-image-1" | "gpt-image-2" | "codex-gpt-image-2";
 export type ApiImageUsage = {
   input_tokens: number;
   output_tokens: number;
@@ -166,7 +166,7 @@ export async function deleteImageHistoryImages(items: ApiImageHistoryDeleteItem[
   });
 }
 
-export async function generateImage(prompt: string, model?: ImageModel) {
+export async function generateImage(prompt: string, model?: ImageModel, size?: string) {
   return httpRequest<{ created: number; data: Array<{ b64_json: string; revised_prompt?: string }> }>(
     "/v1/images/generations",
     {
@@ -174,6 +174,7 @@ export async function generateImage(prompt: string, model?: ImageModel) {
       body: {
         prompt,
         ...(model ? { model } : {}),
+        ...(size ? { size } : {}),
         n: 1,
         response_format: "b64_json",
       },
@@ -181,7 +182,7 @@ export async function generateImage(prompt: string, model?: ImageModel) {
   );
 }
 
-export async function editImage(files: File | File[], prompt: string, model?: ImageModel) {
+export async function editImage(files: File | File[], prompt: string, model?: ImageModel, size?: string) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
 
@@ -191,6 +192,9 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   formData.append("prompt", prompt);
   if (model) {
     formData.append("model", model);
+  }
+  if (size) {
+    formData.append("size", size);
   }
   formData.append("n", "1");
 

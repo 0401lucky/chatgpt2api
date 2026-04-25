@@ -6,14 +6,12 @@ import unittest
 import requests
 
 from services.chatgpt_service import ChatGPTService
-from test.integration_guard import requires_integration
 
 
 AUTH_KEY = "chatgpt2api"
 BASE_URL = "http://localhost:8000"
 
 
-@requires_integration
 class ModelListTests(unittest.TestCase):
     def test_list_models_function(self):
         """测试直接调用服务层获取模型列表。"""

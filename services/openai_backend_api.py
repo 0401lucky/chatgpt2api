@@ -293,16 +293,18 @@ class OpenAIBackendAPI:
         data.sort(key=lambda item: item["id"])
         return {"object": "list", "data": data}
 
-    def _build_image_prompt(self, prompt: str, size: str) -> str:
+    def _build_image_prompt(self, prompt: str, size: str | None) -> str:
         """把标准图片 prompt 和宽高比转成底层图片生成 prompt。"""
         if not size:
             return prompt
-        if size not in {"1:1", "16:9", "9:16"}:
+        if size not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
             return f"{prompt.strip()}\n\n输出图片，宽高比为 {size}。"
         hint = {
             "1:1": "输出为 1:1 正方形构图，主体居中，适合正方形画幅。",
             "16:9": "输出为 16:9 横屏构图，适合宽画幅展示。",
             "9:16": "输出为 9:16 竖屏构图，适合竖版画幅展示。",
+            "4:3": "输出为 4:3 比例，兼顾宽度与高度，适合展示画面细节。",
+            "3:4": "输出为 3:4 比例，纵向构图，适合人物肖像或竖向场景。",
         }[size]
         return f"{prompt.strip()}\n\n{hint}"
 
@@ -724,7 +726,7 @@ class OpenAIBackendAPI:
                 data.append({"url": self._save_image_bytes(response.content)})
         return {"created": int(time.time()), "data": data}
 
-    def _run_image_task(self, prompt: str, model: str, size: str, images: Optional[list[str]] = None,
+    def _run_image_task(self, prompt: str, model: str, size: str | None, images: Optional[list[str]] = None,
                         response_format: str = "url") -> Dict[str, Any]:
         """执行图片生成或图片编辑主流程。"""
         if not self.access_token:
@@ -885,6 +887,9 @@ class OpenAIBackendAPI:
             return text[len(history_text):]
         return text
 
+    def _normalize_assistant_text(self, text: str, history_text: str) -> str:
+        return self._strip_history_prefix(text, history_text)
+
     def _text_from_message(self, message: Dict[str, Any]) -> str:
         """从单条 message 结构中提取文本。"""
         content = message.get("content") or {}
@@ -932,6 +937,7 @@ class OpenAIBackendAPI:
         self,
         prompt: str,
         model: str = "gpt-image-2",
+        size: str | None = None,
         images: Optional[list[str]] = None,
     ) -> Iterator[Dict[str, Any]]:
         if not self.access_token:
@@ -948,7 +954,7 @@ class OpenAIBackendAPI:
         references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images or [], start=1)]
         self._bootstrap()
         requirements = self._get_auth_chat_requirements()
-        final_prompt = self._build_image_prompt(prompt, "1:1")
+        final_prompt = self._build_image_prompt(prompt, size)
         conduit_token = self._prepare_image_conversation(final_prompt, requirements, model)
         sse = self._start_image_generation(final_prompt, requirements, conduit_token, model, references)
         try:
@@ -1083,7 +1089,7 @@ class OpenAIBackendAPI:
             }],
         }
 
-    def _apply_text_patch(self, event: Dict[str, Any], current_text: str) -> str:
+    def _apply_text_patch(self, event: Dict[str, Any], current_text: str, history_text: str = "") -> str:
         """从 patch 事件里恢复最新文本。"""
         operations = event.get("v")
         if not isinstance(operations, list):
@@ -1097,16 +1103,16 @@ class OpenAIBackendAPI:
             if item.get("o") == "append":
                 text += str(item.get("v", ""))
             if item.get("o") == "replace":
-                text = str(item.get("v", ""))
+                text = self._normalize_assistant_text(str(item.get("v", "")), history_text)
         return text
 
-    def _next_assistant_text(self, event: Dict[str, Any], current_text: str) -> str:
+    def _next_assistant_text(self, event: Dict[str, Any], current_text: str, history_text: str = "") -> str:
         """从 SSE 事件中推导当前 assistant 全量文本。"""
         message = event.get("message")
         if isinstance(message, dict) and (message.get("author") or {}).get("role") == "assistant":
             text = self._text_from_message(message)
             if text:
-                return text
+                return self._normalize_assistant_text(text, history_text)
 
         value = event.get("v")
         if isinstance(value, dict):
@@ -1114,9 +1120,9 @@ class OpenAIBackendAPI:
             if isinstance(message, dict) and (message.get("author") or {}).get("role") == "assistant":
                 text = self._text_from_message(message)
                 if text:
-                    return text
+                    return self._normalize_assistant_text(text, history_text)
 
-        return self._apply_text_patch(event, current_text)
+        return self._apply_text_patch(event, current_text, history_text)
 
     def _encoding_for_model(self, model: str):
         """按模型选择 tokenizer，失败时回退到通用编码。"""
@@ -1194,6 +1200,29 @@ class OpenAIBackendAPI:
             if isinstance(content, str) and content:
                 parts.append(content)
         return "".join(parts)
+
+    def _assistant_history_messages(self, messages: list[Dict[str, Any]]) -> list[str]:
+        parts = []
+        for message in messages:
+            if message.get("role") != "assistant":
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str) and content:
+                parts.append(content)
+        return parts
+
+    def _event_assistant_text(self, event: Dict[str, Any], history_text: str = "") -> str:
+        message = event.get("message")
+        if isinstance(message, dict) and (message.get("author") or {}).get("role") == "assistant":
+            return self._normalize_assistant_text(self._text_from_message(message), history_text)
+
+        value = event.get("v")
+        if isinstance(value, dict):
+            message = value.get("message")
+            if isinstance(message, dict) and (message.get("author") or {}).get("role") == "assistant":
+                return self._normalize_assistant_text(self._text_from_message(message), history_text)
+
+        return ""
 
     def _last_event(self, events: list[Dict[str, Any]]) -> Dict[str, Any]:
         """返回最后一个非终止事件，方便排查问题。"""
@@ -1294,14 +1323,14 @@ class OpenAIBackendAPI:
         """返回当前模式下可用模型，格式对齐 OpenAI `/v1/models`。"""
         return self._normalize_models(self._get_models_raw(authenticated=bool(self.access_token)))
 
-    def images_generations(self, prompt: str, model: str = "gpt-image-2", size: str = "1:1",
+    def images_generations(self, prompt: str, model: str = "gpt-image-2", size: str | None = None,
                            response_format: str = "url") -> Dict[str, Any]:
         """返回 OpenAI `/v1/images/generations` 风格结果。"""
         if self._is_codex_image_model(model):
             return self._run_codex_image_task(prompt, response_format=response_format)
         return self._run_image_task(prompt, model, size, response_format=response_format)
 
-    def images_edits(self, image: str | list[str], prompt: str, model: str = "gpt-image-2", size: str = "1:1",
+    def images_edits(self, image: str | list[str], prompt: str, model: str = "gpt-image-2", size: str | None = None,
                      response_format: str = "url") -> Dict[str, Any]:
         """返回 OpenAI `/v1/images/edits` 风格结果。"""
         images = [image] if isinstance(image, str) else image
@@ -1340,7 +1369,9 @@ class OpenAIBackendAPI:
         completion_id = f"chatcmpl-{new_uuid()}"
         created = int(time.time())
         history_assistant_text = self._assistant_history_text(messages)
-        current_text = history_assistant_text
+        history_assistant_messages = self._assistant_history_messages(messages)
+        history_assistant_index = 0
+        current_text = ""
         sent_role = False
         self._bootstrap()
         requirements = self._get_chat_requirements(authenticated=bool(self.access_token))
@@ -1350,7 +1381,16 @@ class OpenAIBackendAPI:
         for event in self._stream_events(path, requirements, payload):
             if event.get("done"):
                 break
-            next_text = self._next_assistant_text(event, current_text)
+            event_assistant_text = self._event_assistant_text(event, history_assistant_text)
+            if (
+                history_assistant_index < len(history_assistant_messages)
+                and event_assistant_text
+                and event_assistant_text == history_assistant_messages[history_assistant_index]
+            ):
+                history_assistant_index += 1
+                current_text = ""
+                continue
+            next_text = self._next_assistant_text(event, current_text, history_assistant_text)
             if next_text == current_text:
                 continue
             delta = next_text[len(current_text):] if next_text.startswith(current_text) else next_text

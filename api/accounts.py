@@ -26,14 +26,17 @@ class AccountCreateRequest(BaseModel):
 
 
 class AccountDeleteRequest(BaseModel):
+    tokens: list[str] = Field(default_factory=list)
     account_ids: list[str] = Field(default_factory=list)
 
 
 class AccountRefreshRequest(BaseModel):
+    access_tokens: list[str] = Field(default_factory=list)
     account_ids: list[str] = Field(default_factory=list)
 
 
 class AccountUpdateRequest(BaseModel):
+    access_token: str = ""
     account_id: str = ""
     type: str | None = None
     status: str | None = None
@@ -104,9 +107,12 @@ def create_router() -> APIRouter:
     @router.delete("/api/accounts")
     async def delete_accounts(body: AccountDeleteRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
+        tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         account_ids = [str(account_id or "").strip() for account_id in body.account_ids if str(account_id or "").strip()]
+        if tokens:
+            return account_service.delete_accounts(tokens)
         if not account_ids:
-            raise HTTPException(status_code=400, detail={"error": "account_ids is required"})
+            raise HTTPException(status_code=400, detail={"error": "tokens or account_ids is required"})
         if not account_service.list_tokens_by_ids(account_ids):
             raise HTTPException(status_code=404, detail={"error": "accounts not found"})
         return account_service.delete_accounts_by_ids(account_ids)
@@ -114,26 +120,27 @@ def create_router() -> APIRouter:
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
+        access_tokens = [str(token or "").strip() for token in body.access_tokens if str(token or "").strip()]
         account_ids = [str(account_id or "").strip() for account_id in body.account_ids if str(account_id or "").strip()]
-        if not account_ids:
+        if not access_tokens and account_ids:
+            access_tokens = account_service.list_tokens_by_ids(account_ids)
+        if not access_tokens:
             access_tokens = account_service.list_tokens()
-            if not access_tokens:
-                raise HTTPException(status_code=400, detail={"error": "account_ids is required"})
-            return account_service.refresh_accounts(access_tokens)
-        if not account_service.list_tokens_by_ids(account_ids):
-            raise HTTPException(status_code=404, detail={"error": "accounts not found"})
-        return account_service.refresh_accounts_by_ids(account_ids)
+        if not access_tokens:
+            raise HTTPException(status_code=400, detail={"error": "access_tokens or account_ids is required"})
+        return account_service.refresh_accounts(access_tokens)
 
     @router.post("/api/accounts/update")
     async def update_account(body: AccountUpdateRequest, authorization: str | None = Header(default=None)):
         require_auth_key(authorization)
+        access_token = str(body.access_token or "").strip()
         account_id = str(body.account_id or "").strip()
-        if not account_id:
-            raise HTTPException(status_code=400, detail={"error": "account_id is required"})
+        if not access_token and not account_id:
+            raise HTTPException(status_code=400, detail={"error": "access_token or account_id is required"})
         updates = {key: value for key, value in {"type": body.type, "status": body.status, "quota": body.quota}.items() if value is not None}
         if not updates:
             raise HTTPException(status_code=400, detail={"error": "no updates provided"})
-        account = account_service.update_account_by_id(account_id, updates)
+        account = account_service.update_account(access_token, updates) if access_token else account_service.update_account_by_id(account_id, updates)
         if account is None:
             raise HTTPException(status_code=404, detail={"error": "account not found"})
         return {"item": account, "items": account_service.list_accounts()}

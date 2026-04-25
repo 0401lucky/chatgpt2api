@@ -7,7 +7,6 @@ from pathlib import Path
 
 import requests
 
-from test.integration_guard import requires_integration
 from test.utils import save_image
 from utils.log import logger
 
@@ -36,7 +35,6 @@ def summarize_chunk(chunk: dict[str, object]) -> dict[str, object]:
     }
 
 
-@requires_integration
 class ImageEditsTests(unittest.TestCase):
     def test_image_edit_http(self):
         """测试图片编辑的非流式 HTTP 调用。"""

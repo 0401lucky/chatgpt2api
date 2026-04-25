@@ -22,6 +22,7 @@ class ImageGenerationRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
     n: int = Field(default=1, ge=1, le=4)
+    size: str | None = None
     response_format: str = "b64_json"
     history_disabled: bool = True
     stream: bool | None = None
@@ -137,7 +138,9 @@ async def _normalize_multipart_edit_images(form: FormData) -> list[tuple[bytes, 
     return images
 
 
-async def _parse_image_edit_request(request: Request) -> tuple[str, str, int, str, bool, list[tuple[bytes, str, str]]]:
+async def _parse_image_edit_request(
+    request: Request,
+) -> tuple[str, str, int, str | None, str, bool, list[tuple[bytes, str, str]]]:
     content_type = str(request.headers.get("content-type") or "").lower()
     if content_type.startswith("application/json"):
         try:
@@ -153,10 +156,11 @@ async def _parse_image_edit_request(request: Request) -> tuple[str, str, int, st
 
         model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
         n = parse_image_count(body.get("n"))
+        size = str(body.get("size") or "").strip() or None
         response_format = str(body.get("response_format") or "b64_json").strip() or "b64_json"
         stream = _parse_stream_flag(body.get("stream"))
         images = _normalize_json_edit_images(body.get("images"))
-        return prompt, model, n, response_format, stream, images
+        return prompt, model, n, size, response_format, stream, images
 
     form = await request.form()
     prompt = str(form.get("prompt") or "").strip()
@@ -165,10 +169,11 @@ async def _parse_image_edit_request(request: Request) -> tuple[str, str, int, st
 
     model = str(form.get("model") or "gpt-image-2").strip() or "gpt-image-2"
     n = parse_image_count(form.get("n"))
+    size = str(form.get("size") or "").strip() or None
     response_format = str(form.get("response_format") or "b64_json").strip() or "b64_json"
     stream = _parse_stream_flag(form.get("stream"))
     images = await _normalize_multipart_edit_images(form)
-    return prompt, model, n, response_format, stream, images
+    return prompt, model, n, size, response_format, stream, images
 
 
 def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
@@ -198,20 +203,22 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
             return StreamingResponse(
                 sse_json_stream(
                     chatgpt_service.stream_image_generation(
-                        body.prompt, body.model, body.n, body.response_format, base_url
+                        body.prompt, body.model, body.n, body.size, body.response_format, base_url
                     )
                 ),
                 media_type="text/event-stream",
             )
         try:
             return await run_in_threadpool(
-                chatgpt_service.generate_api_images,
-                body.prompt,
-                body.model,
-                body.n,
-                "/v1/images/generations",
-                body.response_format,
-                base_url,
+                lambda: chatgpt_service.generate_api_images(
+                    body.prompt,
+                    body.model,
+                    body.n,
+                    "/v1/images/generations",
+                    body.response_format,
+                    base_url,
+                    size=body.size,
+                )
             )
         except ImageGenerationError as exc:
             raise_image_quota_error(exc)
@@ -222,25 +229,27 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
             authorization: str | None = Header(default=None),
     ):
         require_auth_key(authorization)
-        prompt, model, n, response_format, stream, images = await _parse_image_edit_request(request)
+        prompt, model, n, size, response_format, stream, images = await _parse_image_edit_request(request)
         base_url = resolve_image_base_url(request)
         if stream:
             if not account_service.has_available_account():
                 raise_image_quota_error(RuntimeError("no available image quota"))
             return StreamingResponse(
-                sse_json_stream(chatgpt_service.stream_image_edit(prompt, images, model, n, response_format, base_url)),
+                sse_json_stream(chatgpt_service.stream_image_edit(prompt, images, model, n, size, response_format, base_url)),
                 media_type="text/event-stream",
             )
         try:
             return await run_in_threadpool(
-                chatgpt_service.edit_api_images,
-                prompt,
-                images,
-                model,
-                n,
-                "/v1/images/edits",
-                response_format,
-                base_url,
+                lambda: chatgpt_service.edit_api_images(
+                    prompt,
+                    images,
+                    model,
+                    n,
+                    "/v1/images/edits",
+                    response_format,
+                    base_url,
+                    size=size,
+                )
             )
         except ImageGenerationError as exc:
             raise_image_quota_error(exc)

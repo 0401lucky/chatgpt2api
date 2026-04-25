@@ -13,6 +13,7 @@ from curl_cffi.requests import Session
 
 from services.config import config
 from services.proxy_service import proxy_settings
+from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
 
@@ -29,8 +30,13 @@ class AccountService:
         "enterprise": "Team",
     }
 
-    def __init__(self, store_file: Path):
-        self.store_file = store_file
+    def __init__(self, storage_backend: StorageBackend | Path):
+        if isinstance(storage_backend, Path):
+            from services.storage.json_storage import JSONStorageBackend
+
+            self.storage = JSONStorageBackend(storage_backend)
+        else:
+            self.storage = storage_backend
         self._lock = Lock()
         self._index = 0
         self._accounts = self._load_accounts()
@@ -167,22 +173,11 @@ class AccountService:
         return quota, restore_at, True
 
     def _load_accounts(self) -> list[dict]:
-        if not self.store_file.exists():
-            return []
-        try:
-            data = json.loads(self.store_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(data, list):
-            return []
-        return [normalized for item in data if (normalized := self._normalize_account(item)) is not None]
+        accounts = self.storage.load_accounts()
+        return [normalized for item in accounts if (normalized := self._normalize_account(item)) is not None]
 
     def _save_accounts(self) -> None:
-        self.store_file.parent.mkdir(parents=True, exist_ok=True)
-        self.store_file.write_text(
-            json.dumps(self._accounts, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        self.storage.save_accounts(self._accounts)
 
     def _build_remote_headers(self, access_token: str) -> tuple[dict[str, str], str]:
         account = self.get_account(access_token) or {}
@@ -581,4 +576,4 @@ class AccountService:
         return self.refresh_accounts(self.list_tokens_by_ids(account_ids))
 
 
-account_service = AccountService(config.accounts_file)
+account_service = AccountService(config.get_storage_backend())

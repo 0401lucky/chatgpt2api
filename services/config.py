@@ -6,24 +6,27 @@ import os
 import sys
 from pathlib import Path
 
+from services.storage.base import StorageBackend
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
 VERSION_FILE = BASE_DIR / "VERSION"
-PLACEHOLDER_AUTH_KEYS = {
-    "your_real_auth_key",
-    "replace-me",
-    "chatgpt2api",
-}
 
 
 @dataclass(frozen=True)
 class LoadedSettings:
     auth_key: str
-    accounts_file: Path
-    image_history_file: Path
-    image_history_dir: Path
     refresh_account_interval_minute: int
+
+
+def _normalize_auth_key(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _is_invalid_auth_key(value: object) -> bool:
+    normalized = _normalize_auth_key(value)
+    return normalized in {"", "your_real_auth_key"}
 
 
 def _read_json_object(path: Path, *, name: str) -> dict[str, object]:
@@ -42,29 +45,15 @@ def _read_json_object(path: Path, *, name: str) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
-def _normalize_auth_key(value: object) -> str:
-    auth_key = str(value or "").strip()
-    return "" if auth_key.lower() in PLACEHOLDER_AUTH_KEYS else auth_key
-
-
-def _missing_auth_key_message() -> str:
-    return (
-        "❌ auth-key 未设置！\n"
-        "请按以下任意一种方式解决：\n"
-        "1. 在环境变量中添加：\n"
-        "   CHATGPT2API_AUTH_KEY = your_real_auth_key\n"
-        "2. 或者在 config.json 中填写：\n"
-        '   "auth-key": "your_real_auth_key"\n'
-        "注意：占位值 your_real_auth_key / replace-me / chatgpt2api 不会被接受。"
-    )
-
-
 def _load_settings() -> LoadedSettings:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     raw_config = _read_json_object(CONFIG_FILE, name="config.json")
-    auth_key = _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or raw_config.get("auth-key") or "")
-    if not auth_key:
-        raise ValueError(_missing_auth_key_message())
+    auth_key = _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or raw_config.get("auth-key"))
+    if _is_invalid_auth_key(auth_key):
+        raise ValueError(
+            "❌ auth-key 未设置！\n"
+            "请在环境变量 CHATGPT2API_AUTH_KEY 中设置，或者在 config.json 中填写 auth-key。"
+        )
 
     try:
         refresh_interval = int(raw_config.get("refresh_account_interval_minute", 60))
@@ -73,9 +62,6 @@ def _load_settings() -> LoadedSettings:
 
     return LoadedSettings(
         auth_key=auth_key,
-        accounts_file=DATA_DIR / "accounts.json",
-        image_history_file=DATA_DIR / "image_history.json",
-        image_history_dir=DATA_DIR / "image-history",
         refresh_account_interval_minute=refresh_interval,
     )
 
@@ -85,8 +71,16 @@ class ConfigStore:
         self.path = path
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
-        if not self.auth_key:
-            raise ValueError(_missing_auth_key_message())
+        self._storage_backend: StorageBackend | None = None
+        if _is_invalid_auth_key(self.auth_key):
+            raise ValueError(
+                "❌ auth-key 未设置！\n"
+                "请按以下任意一种方式解决：\n"
+                "1. 在 Render 的 Environment 变量中添加：\n"
+                "   CHATGPT2API_AUTH_KEY = your_real_auth_key\n"
+                "2. 或者在 config.json 中填写：\n"
+                '   "auth-key": "your_real_auth_key"'
+            )
 
     def _load(self) -> dict[str, object]:
         return _read_json_object(self.path, name="config.json")
@@ -96,21 +90,11 @@ class ConfigStore:
 
     @property
     def auth_key(self) -> str:
-        return _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or self.data.get("auth-key") or "")
+        return _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or self.data.get("auth-key"))
 
     @property
     def accounts_file(self) -> Path:
         return DATA_DIR / "accounts.json"
-
-    @property
-    def image_history_file(self) -> Path:
-        return DATA_DIR / "image_history.json"
-
-    @property
-    def image_history_dir(self) -> Path:
-        path = DATA_DIR / "image-history"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
 
     @property
     def refresh_account_interval_minute(self) -> int:
@@ -122,6 +106,16 @@ class ConfigStore:
     @property
     def images_dir(self) -> Path:
         path = DATA_DIR / "images"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def image_history_file(self) -> Path:
+        return DATA_DIR / "image_history.json"
+
+    @property
+    def image_history_dir(self) -> Path:
+        path = DATA_DIR / "image_history"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -150,11 +144,18 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
-        if not _normalize_auth_key(next_data.get("auth-key")):
+        if _is_invalid_auth_key(next_data.get("auth-key")):
             next_data["auth-key"] = self.data.get("auth-key") or os.getenv("CHATGPT2API_AUTH_KEY") or ""
         self.data = next_data
         self._save()
         return self.get()
+
+    def get_storage_backend(self) -> StorageBackend:
+        """获取存储后端实例（单例）"""
+        if self._storage_backend is None:
+            from services.storage.factory import create_storage_backend
+            self._storage_backend = create_storage_backend(DATA_DIR)
+        return self._storage_backend
 
 
 config = ConfigStore(CONFIG_FILE)

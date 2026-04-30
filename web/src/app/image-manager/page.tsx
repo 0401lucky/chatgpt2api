@@ -1,18 +1,24 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Copy, ImageIcon, LoaderCircle, Maximize2, RefreshCw, Search } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { CalendarDays, ChevronLeft, ChevronRight, Copy, ImageIcon, LoaderCircle, Maximize2, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { fetchManagedImages, type ManagedImage } from "@/lib/api";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { deleteManagedImages, fetchManagedImages, type ManagedImage } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 function formatSize(size: number) {
   return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.ceil(size / 1024)} KB`;
+}
+
+function imageKey(item: ManagedImage) {
+  return item.path || item.url;
 }
 
 function ImageManagerContent() {
@@ -24,8 +30,11 @@ function ImageManagerContent() {
   const [page, setPage] = useState(1);
   const [dimensions, setDimensions] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(true);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
   const lightboxImages = items.map((item) => ({
-    id: item.name,
+    id: imageKey(item),
     src: item.url,
     sizeLabel: formatSize(item.size),
     dimensions: dimensions[item.url],
@@ -34,12 +43,17 @@ function ImageManagerContent() {
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
   const safePage = Math.min(page, pageCount);
   const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
+  const selectedCount = deleteMode === "filtered" ? items.length : selectedPaths.length;
+  const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(imageKey(item)));
+  const allSelected = items.length > 0 && items.every((item) => selectedSet.has(imageKey(item)));
 
   const loadImages = async () => {
     setIsLoading(true);
     try {
       const data = await fetchManagedImages({ start_date: startDate, end_date: endDate });
       setItems(data.items);
+      setSelectedPaths((current) => current.filter((path) => data.items.some((item) => imageKey(item) === path)));
       setPage(1);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载图片失败");
@@ -51,6 +65,26 @@ function ImageManagerContent() {
   const clearFilters = () => {
     setStartDate("");
     setEndDate("");
+  };
+
+  const togglePaths = (paths: string[], checked: boolean) => {
+    setSelectedPaths((current) => checked ? Array.from(new Set([...current, ...paths])) : current.filter((path) => !paths.includes(path)));
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteMode || selectedCount === 0) return;
+    setIsDeleting(true);
+    try {
+      const data = await deleteManagedImages(deleteMode === "filtered" ? { start_date: startDate, end_date: endDate, all_matching: true } : { paths: selectedPaths });
+      toast.success(`已删除 ${data.removed} 张图片`);
+      setDeleteMode(null);
+      setSelectedPaths([]);
+      await loadImages();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除图片失败");
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   useEffect(() => {
@@ -73,20 +107,42 @@ function ImageManagerContent() {
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
+          <Button variant="outline" onClick={() => setDeleteMode("filtered")} disabled={isDeleting || items.length === 0 || (!startDate && !endDate)} className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50">
+            <Trash2 className="size-4" />
+            删除匹配日期
+          </Button>
         </div>
       </div>
 
       <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
         <CardContent className="p-0">
-          <div className="flex items-center justify-between border-b border-stone-100 px-5 py-4">
-            <div className="flex items-center gap-2 text-sm text-stone-600">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
+            <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
               <ImageIcon className="size-4" />
               共 {items.length} 张
+              <label className="flex items-center gap-2">
+                <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.map(imageKey), Boolean(checked))} />
+                本页全选
+              </label>
+              <label className="flex items-center gap-2">
+                <Checkbox checked={allSelected} onCheckedChange={(checked) => togglePaths(items.map(imageKey), Boolean(checked))} />
+                全选结果
+              </label>
+              {selectedPaths.length > 0 ? <span>已选 {selectedPaths.length} 张</span> : null}
             </div>
-            <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadImages()} disabled={isLoading}>
-              <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
-              刷新
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadImages()} disabled={isLoading}>
+                <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
+                刷新
+              </Button>
+              <button type="button" className="text-sm text-stone-500 hover:text-stone-900 disabled:text-stone-300" onClick={() => setSelectedPaths([])} disabled={selectedPaths.length === 0 || isDeleting}>
+                取消选择
+              </button>
+              <Button variant="outline" className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50" onClick={() => setDeleteMode("selected")} disabled={selectedPaths.length === 0 || isDeleting}>
+                <Trash2 className="size-4" />
+                删除所选
+              </Button>
+            </div>
           </div>
           <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {currentRows.map((item, index) => {
@@ -123,17 +179,20 @@ function ImageManagerContent() {
                       <CalendarDays className="size-3.5" />
                       {item.created_at}
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="size-8 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-700"
-                      onClick={() => {
-                        void navigator.clipboard.writeText(item.url);
-                        toast.success("图片地址已复制");
-                      }}
-                    >
-                      <Copy className="size-4" />
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-8 rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+                        onClick={() => {
+                          void navigator.clipboard.writeText(item.url);
+                          toast.success("图片地址已复制");
+                        }}
+                      >
+                        <Copy className="size-4" />
+                      </Button>
+                      <Checkbox checked={selectedSet.has(imageKey(item))} onCheckedChange={(checked) => togglePaths([imageKey(item)], Boolean(checked))} />
+                    </div>
                   </div>
                   <div className="flex items-center justify-between gap-2">
                     <span>{formatSize(item.size)}</span>
@@ -162,6 +221,25 @@ function ImageManagerContent() {
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
       />
+      <Dialog open={Boolean(deleteMode)} onOpenChange={(open) => (!open ? setDeleteMode(null) : null)}>
+        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>{deleteMode === "filtered" ? "删除匹配日期的图片" : "删除所选图片"}</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              确认删除 {selectedCount} 张图片吗？删除后无法恢复。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-xl" onClick={() => setDeleteMode(null)} disabled={isDeleting}>
+              取消
+            </Button>
+            <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmDelete()} disabled={isDeleting || selectedCount === 0}>
+              {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              确认删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

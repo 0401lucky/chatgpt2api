@@ -44,6 +44,11 @@ import {
 
 const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_id";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
+const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
+
+function clampImageCount(value: string) {
+  return String(Math.min(100, Math.max(1, Math.floor(Number(value) || 1))));
+}
 const activeConversationQueueIds = new Set<string>();
 
 function buildConversationTitle(prompt: string) {
@@ -353,7 +358,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: "one"; id: string } | { type: "all" } | null>(null);
 
-  const parsedCount = useMemo(() => Math.max(1, Math.min(10, Number(imageCount) || 1)), [imageCount]);
+  const parsedCount = useMemo(() => Number(clampImageCount(imageCount)), [imageCount]);
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
@@ -384,7 +389,9 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     const loadHistory = async () => {
       try {
         const storedSize = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY) : null;
+        const storedCount = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_COUNT_STORAGE_KEY) : null;
         setImageSize(storedSize || "");
+        setImageCount(storedCount ? clampImageCount(storedCount) : "1");
 
         const items = await listImageConversations();
         const normalizedItems = await recoverConversationHistory(items);
@@ -483,6 +490,12 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   }, [imageSize]);
 
   useEffect(() => {
+    if (typeof window !== "undefined" && parsedCount > 0) {
+      window.localStorage.setItem(IMAGE_COUNT_STORAGE_KEY, String(parsedCount));
+    }
+  }, [parsedCount]);
+
+  useEffect(() => {
     if (selectedConversationId && !conversations.some((conversation) => conversation.id === selectedConversationId)) {
       setSelectedConversationId(pickFallbackConversationId(conversations));
     }
@@ -521,7 +534,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   const clearComposerInputs = useCallback(() => {
     setImagePrompt("");
-    setImageCount("1");
     setReferenceImageFiles([]);
     setReferenceImages([]);
     if (fileInputRef.current) {
@@ -1018,7 +1030,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             fileInputRef={fileInputRef}
             onPromptChange={setImagePrompt}
             onModelChange={setImageModel}
-            onImageCountChange={setImageCount}
+            onImageCountChange={(value) => setImageCount(value ? clampImageCount(value) : "")}
             onImageSizeChange={setImageSize}
             onSubmit={handleSubmit}
             onPickReferenceImage={() => fileInputRef.current?.click()}

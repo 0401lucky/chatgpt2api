@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
 from services.config import config
-from services.image_service import list_images
+from services.image_service import delete_images, list_images
 from services.log_service import log_service
 from services.proxy_service import test_proxy
 
@@ -17,6 +17,13 @@ class SettingsUpdateRequest(BaseModel):
 
 class ProxyTestRequest(BaseModel):
     url: str = ""
+
+
+class ImageDeleteRequest(BaseModel):
+    paths: list[str] = []
+    start_date: str = ""
+    end_date: str = ""
+    all_matching: bool = False
 
 
 def create_router(app_version: str) -> APIRouter:
@@ -52,6 +59,11 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip())
 
+    @router.post("/api/images/delete")
+    async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return delete_images(body.paths, start_date=body.start_date.strip(), end_date=body.end_date.strip(), all_matching=body.all_matching)
+
     @router.get("/api/logs")
     async def get_logs(type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -75,4 +87,3 @@ def create_router(app_version: str) -> APIRouter:
         }
 
     return router
-

@@ -62,6 +62,7 @@ export function TopNav() {
 
   const navItems = session.role === "admin" ? adminNavItems : userNavItems;
   const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
+  const displayName = session.name.trim() || roleLabel;
 
   return (
     <header className="border-b border-stone-100/50">
@@ -113,7 +114,7 @@ export function TopNav() {
         </nav>
         <div className="hidden items-center justify-end gap-2 sm:flex sm:gap-3">
           <span className="hidden rounded-md bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-500 sm:inline-block sm:text-[11px]">
-            {roleLabel}
+            {roleLabel} · {displayName}
           </span>
           <span className="hidden rounded-md bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-500 sm:inline-block sm:text-[11px]">
             v{webConfig.appVersion}

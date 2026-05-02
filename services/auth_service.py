@@ -105,19 +105,52 @@ class AuthService:
     def _build_key_hash_locked(self, raw_key: str, *, exclude_id: str = "") -> str:
         candidate = self._clean(raw_key)
         if not candidate:
-            raise ValueError("key is required")
+            raise ValueError("请输入新的专用密钥")
         admin_key = self._clean(config.auth_key)
         if admin_key and hmac.compare_digest(candidate, admin_key):
-            raise ValueError("key conflicts with admin auth key")
+            raise ValueError("这个密钥和管理员密钥冲突了，请换一个新的密钥")
         key_hash = _hash_key(candidate)
         if self._has_key_hash_locked(key_hash, exclude_id=exclude_id):
-            raise ValueError("key already exists")
+            raise ValueError("这个专用密钥已经存在，请换一个新的密钥")
         return key_hash
 
+    def _has_name_locked(self, name: str, *, role: AuthRole | None = None, exclude_id: str = "") -> bool:
+        candidate = self._clean(name)
+        if not candidate:
+            return False
+        for item in self._items:
+            item_id = self._clean(item.get("id"))
+            if exclude_id and item_id == exclude_id:
+                continue
+            if role is not None and item.get("role") != role:
+                continue
+            if self._clean(item.get("name")) == candidate:
+                return True
+        return False
+
+    def _build_default_name_locked(self, role: AuthRole, *, exclude_id: str = "") -> str:
+        base_name = self._default_name(role)
+        if not self._has_name_locked(base_name, role=role, exclude_id=exclude_id):
+            return base_name
+        suffix = 2
+        while True:
+            candidate = f"{base_name} {suffix}"
+            if not self._has_name_locked(candidate, role=role, exclude_id=exclude_id):
+                return candidate
+            suffix += 1
+
+    def _build_name_locked(self, name: str, *, role: AuthRole, exclude_id: str = "") -> str:
+        candidate = self._clean(name)
+        if not candidate:
+            return self._build_default_name_locked(role, exclude_id=exclude_id)
+        if self._has_name_locked(candidate, role=role, exclude_id=exclude_id):
+            raise ValueError("这个名称已经在使用中了，换一个更容易区分的名称吧")
+        return candidate
+
     def create_key(self, *, role: AuthRole, name: str = "") -> tuple[dict[str, object], str]:
-        normalized_name = self._clean(name) or self._default_name(role)
         with self._lock:
             self._reload_locked()
+            normalized_name = self._build_name_locked(name, role=role)
             while True:
                 raw_key = f"sk-{secrets.token_urlsafe(24)}"
                 try:
@@ -156,8 +189,13 @@ class AuthService:
                 if role is not None and item.get("role") != role:
                     return None
                 next_item = dict(item)
+                next_role = "admin" if str(next_item.get("role") or "").strip().lower() == "admin" else "user"
                 if "name" in updates and updates.get("name") is not None:
-                    next_item["name"] = self._clean(updates.get("name")) or self._default_name(next_item.get("role"))
+                    next_item["name"] = self._build_name_locked(
+                        str(updates.get("name") or ""),
+                        role=next_role,
+                        exclude_id=normalized_id,
+                    )
                 if "enabled" in updates and updates.get("enabled") is not None:
                     next_item["enabled"] = bool(updates.get("enabled"))
                 if "key" in updates and updates.get("key") is not None:

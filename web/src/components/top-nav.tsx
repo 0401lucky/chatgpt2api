@@ -6,8 +6,9 @@ import { Github } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
 import webConfig from "@/constants/common-env";
-import { clearStoredAuthSession, getStoredAuthSession, type StoredAuthSession } from "@/store/auth";
+import { getValidatedAuthSession } from "@/lib/auth-session";
 import { cn } from "@/lib/utils";
+import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 const adminNavItems = [
   { href: "/image", label: "画图" },
@@ -37,7 +38,7 @@ export function TopNav() {
         return;
       }
 
-      const storedSession = await getStoredAuthSession();
+      const storedSession = await getValidatedAuthSession();
       if (!active) {
         return;
       }

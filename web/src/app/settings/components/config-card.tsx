@@ -22,6 +22,7 @@ export function ConfigCard() {
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
+  const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
   const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
@@ -138,6 +139,16 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">自动删除多少天前的本地图片。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">图片轮询超时</label>
+            <Input
+              value={String(config?.image_poll_timeout_secs || "")}
+              onChange={(event) => setImagePollTimeoutSecs(event.target.value)}
+              placeholder="120"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒，等待上游图片结果的最长时间。</p>
           </div>
           <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
             <Checkbox

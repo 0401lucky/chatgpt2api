@@ -11,6 +11,7 @@ from curl_cffi import requests
 from PIL import Image
 
 from services.account_service import account_service
+from services.config import config
 from services.proxy_service import proxy_settings
 from utils.helper import ensure_ok, iter_sse_payloads, new_uuid
 from utils.log import logger
@@ -674,7 +675,7 @@ class OpenAIBackendAPI:
         sediment_ids = list(sediment_ids)
         if poll and conversation_id and not file_ids and not sediment_ids:
             logger.info({"event": "image_resolve_poll_needed", "conversation_id": conversation_id})
-            polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id)
+            polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id, config.image_poll_timeout_secs)
             file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
             sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
         return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)

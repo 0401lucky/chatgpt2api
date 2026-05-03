@@ -112,6 +112,13 @@ class ConfigStore:
             return 30
 
     @property
+    def image_poll_timeout_secs(self) -> int:
+        try:
+            return max(1, int(self.data.get("image_poll_timeout_secs", 120)))
+        except (TypeError, ValueError):
+            return 120
+
+    @property
     def auto_remove_invalid_accounts(self) -> bool:
         value = self.data.get("auto_remove_invalid_accounts", False)
         if isinstance(value, str):
@@ -134,6 +141,16 @@ class ConfigStore:
         return [level for item in levels if (level := str(item or "").strip().lower()) in allowed]
 
     @property
+    def sensitive_words(self) -> list[str]:
+        words = self.data.get("sensitive_words")
+        return [word for item in words if (word := str(item or "").strip())] if isinstance(words, list) else []
+
+    @property
+    def ai_review(self) -> dict[str, object]:
+        value = self.data.get("ai_review")
+        return value if isinstance(value, dict) else {}
+
+    @property
     def images_dir(self) -> Path:
         path = DATA_DIR / "images"
         path.mkdir(parents=True, exist_ok=True)
@@ -146,6 +163,12 @@ class ConfigStore:
     @property
     def image_history_dir(self) -> Path:
         path = DATA_DIR / "image_history"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def image_thumbnails_dir(self) -> Path:
+        path = DATA_DIR / "image_thumbnails"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -183,9 +206,12 @@ class ConfigStore:
         data = dict(self.data)
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["image_retention_days"] = self.image_retention_days
+        data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels
+        data["sensitive_words"] = self.sensitive_words
+        data["ai_review"] = self.ai_review
         data.pop("auth-key", None)
         return data
 

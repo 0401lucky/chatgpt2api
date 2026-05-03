@@ -96,8 +96,17 @@ export type ApiImageHistoryDeleteResponse = {
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
+  sensitive_words?: string[];
+  ai_review?: {
+    enabled?: boolean;
+    base_url?: string;
+    api_key?: string;
+    model?: string;
+    prompt?: string;
+  };
   refresh_account_interval_minute?: number | string;
   image_retention_days?: number | string;
+  image_poll_timeout_secs?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
@@ -110,7 +119,10 @@ export type ManagedImage = {
   date: string;
   size: number;
   url: string;
+  thumbnail_url?: string;
   created_at: string;
+  width?: number;
+  height?: number;
 };
 
 export type SystemLog = {
@@ -399,7 +411,7 @@ export async function createUserKey(name: string) {
   });
 }
 
-export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string }) {
+export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string; key?: string }) {
   return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "POST",
     body: updates,

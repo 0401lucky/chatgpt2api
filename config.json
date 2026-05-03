@@ -2,6 +2,7 @@
   "auth-key": "your_real_auth_key",
   "refresh_account_interval_minute": 60,
   "image_retention_days": 15,
+  "image_poll_timeout_secs": 120,
   "auto_remove_rate_limited_accounts": false,
   "auto_remove_invalid_accounts": true,
   "log_levels": [
@@ -11,5 +12,15 @@
     "warning"
   ],
   "proxy": "",
-  "base_url": ""
+  "base_url": "",
+  "sensitive_words": [
+    "色情"
+  ],
+  "ai_review": {
+    "enabled": false,
+    "base_url": "",
+    "api_key": "",
+    "model": "gpt-5.4-mini",
+    "prompt": "判断用户请求是否允许。只回答 ALLOW 或 REJECT。"
+  }
 }

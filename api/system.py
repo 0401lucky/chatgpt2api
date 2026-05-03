@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
 from services.config import config
-from services.image_service import delete_images, list_images
+from services.image_service import delete_images, get_thumbnail_response, list_images
 from services.log_service import log_service
 from services.proxy_service import test_proxy
 
@@ -58,6 +58,10 @@ def create_router(app_version: str) -> APIRouter:
     async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip())
+
+    @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
+    async def get_image_thumbnail(image_path: str):
+        return get_thumbnail_response(image_path)
 
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):

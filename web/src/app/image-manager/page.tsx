@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
+import { ImageThumbnail } from "@/components/image-thumbnail";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -21,6 +22,10 @@ function imageKey(item: ManagedImage) {
   return item.path || item.url;
 }
 
+function imageDimensions(item: ManagedImage) {
+  return item.width && item.height ? `${item.width} x ${item.height}` : "-";
+}
+
 function ImageManagerContent() {
   const [items, setItems] = useState<ManagedImage[]>([]);
   const [startDate, setStartDate] = useState("");
@@ -28,7 +33,6 @@ function ImageManagerContent() {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
-  const [dimensions, setDimensions] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
@@ -37,7 +41,7 @@ function ImageManagerContent() {
     id: imageKey(item),
     src: item.url,
     sizeLabel: formatSize(item.size),
-    dimensions: dimensions[item.url],
+    dimensions: imageDimensions(item),
   }));
   const pageSize = 12;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
@@ -145,7 +149,7 @@ function ImageManagerContent() {
             </div>
           </div>
           <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {currentRows.map((item, index) => {
+            {currentRows.map((item) => {
               const imageIndex = items.findIndex((row) => row.url === item.url);
               return (
               <div key={item.url} className="group border-r border-b border-stone-100 p-4 transition hover:bg-stone-50">
@@ -157,17 +161,12 @@ function ImageManagerContent() {
                     setLightboxOpen(true);
                   }}
                 >
-                  <img
+                  <ImageThumbnail
                     src={item.url}
+                    thumbnailSrc={item.thumbnail_url}
                     alt={item.name}
-                    className="h-full w-full object-cover transition group-hover:scale-[1.02]"
-                    onLoad={(event) => {
-                      const image = event.currentTarget;
-                      setDimensions((current) => ({
-                        ...current,
-                        [item.url]: `${image.naturalWidth} x ${image.naturalHeight}`,
-                      }));
-                    }}
+                    className="h-full w-full"
+                    imageClassName="transition group-hover:scale-[1.02]"
                   />
                   <span className="absolute right-2 bottom-2 rounded-full bg-black/50 p-2 text-white opacity-0 transition group-hover:opacity-100">
                     <Maximize2 className="size-4" />
@@ -196,7 +195,7 @@ function ImageManagerContent() {
                   </div>
                   <div className="flex items-center justify-between gap-2">
                     <span>{formatSize(item.size)}</span>
-                    <span>{dimensions[item.url] || "-"}</span>
+                    <span>{imageDimensions(item)}</span>
                   </div>
                 </div>
               </div>

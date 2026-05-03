@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, LoaderCircle, RefreshCw, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
+import { ImageThumbnail, getImageThumbnailUrl } from "@/components/image-thumbnail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -91,6 +92,12 @@ function LogsContent() {
     setDetailOpen(true);
   };
 
+  const openLogImage = (item: SystemLog, index: number) => {
+    setDetailLog(item);
+    setLightboxIndex(index);
+    setLightboxOpen(true);
+  };
+
   useEffect(() => {
     void loadLogs();
   }, [type, startDate, endDate]);
@@ -139,32 +146,61 @@ function LogsContent() {
                   {isCallLog ? <TableHead>令牌名称</TableHead> : null}
                   {isCallLog ? <TableHead>调用耗时</TableHead> : null}
                   {isCallLog ? <TableHead>状态</TableHead> : null}
+                  {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
                   <TableHead>简述</TableHead>
                   <TableHead className="w-28">详情</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {currentRows.map((item, index) => (
-                  <TableRow key={`${item.time}-${index}`} className="text-stone-600">
-                    <TableCell className="whitespace-nowrap">{item.time}</TableCell>
-                    <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
-                    {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
-                    {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
-                    {isCallLog ? (
+                {currentRows.map((item, index) => {
+                  const urls = getUrls(item);
+                  return (
+                    <TableRow key={`${item.time}-${index}`} className="text-stone-600">
+                      <TableCell className="whitespace-nowrap">{item.time}</TableCell>
+                      <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
+                      {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
+                      {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
+                      {isCallLog ? (
+                        <TableCell>
+                          <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
+                            {getStatus(item)}
+                          </Badge>
+                        </TableCell>
+                      ) : null}
+                      {isCallLog ? (
+                        <TableCell>
+                          {urls.length ? (
+                            <div className="flex items-center gap-1.5">
+                              {urls.slice(0, 3).map((url, imageIndex) => (
+                                <button
+                                  key={`${url}-${imageIndex}`}
+                                  type="button"
+                                  className="relative size-9 overflow-hidden rounded-lg border border-stone-200 bg-stone-100"
+                                  onClick={() => openLogImage(item, imageIndex)}
+                                  title="预览图片"
+                                >
+                                  <ImageThumbnail src={url} thumbnailSrc={getImageThumbnailUrl(url)} className="h-full w-full" />
+                                </button>
+                              ))}
+                              {urls.length > 3 ? <span className="text-xs text-stone-400">+{urls.length - 3}</span> : null}
+                            </div>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-xs text-stone-400">
+                              <ImageIcon className="size-3.5" />
+                              -
+                            </span>
+                          )}
+                        </TableCell>
+                      ) : null}
+                      <TableCell className="max-w-[420px] truncate text-stone-500">{item.summary || "-"}</TableCell>
                       <TableCell>
-                        <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
-                          {getStatus(item)}
-                        </Badge>
+                        <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>
+                          查看详情
+                        </Button>
                       </TableCell>
-                    ) : null}
-                    <TableCell className="max-w-[420px] truncate text-stone-500">{item.summary || "-"}</TableCell>
-                    <TableCell>
-                      <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>
-                        查看详情
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>
@@ -207,7 +243,7 @@ function LogsContent() {
                     setLightboxOpen(true);
                   }}
                 >
-                  <img src={url} alt="" className="h-full w-full object-cover" />
+                  <ImageThumbnail src={url} thumbnailSrc={getImageThumbnailUrl(url)} className="h-full w-full" />
                 </button>
               ))}
             </div>

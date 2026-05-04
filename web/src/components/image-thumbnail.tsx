@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
+import { normalizeImageUrl } from "@/lib/image-url";
 import { cn } from "@/lib/utils";
 
 type ImageThumbnailProps = {
@@ -20,7 +21,11 @@ export function getImageThumbnailUrl(src: string) {
 }
 
 export function ImageThumbnail({ src, thumbnailSrc, alt = "", className, imageClassName }: ImageThumbnailProps) {
-  const initialSrc = useMemo(() => thumbnailSrc || getImageThumbnailUrl(src), [src, thumbnailSrc]);
+  const fallbackSrc = useMemo(() => normalizeImageUrl(src), [src]);
+  const initialSrc = useMemo(
+    () => normalizeImageUrl(thumbnailSrc || getImageThumbnailUrl(src)),
+    [src, thumbnailSrc],
+  );
   const [currentSrc, setCurrentSrc] = useState(initialSrc);
 
   useEffect(() => {
@@ -36,8 +41,8 @@ export function ImageThumbnail({ src, thumbnailSrc, alt = "", className, imageCl
         loading="lazy"
         decoding="async"
         onError={() => {
-          if (currentSrc !== src) {
-            setCurrentSrc(src);
+          if (currentSrc !== fallbackSrc) {
+            setCurrentSrc(fallbackSrc);
           }
         }}
       />

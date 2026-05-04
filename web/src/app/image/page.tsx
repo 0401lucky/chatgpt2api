@@ -26,6 +26,7 @@ import {
   type ImageModel,
   type ImageTask,
 } from "@/lib/api";
+import { normalizeImageUrl } from "@/lib/image-url";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
   clearImageConversations,
@@ -117,7 +118,7 @@ function buildReferenceImageFromResult(image: StoredImage, fileName: string): St
 }
 
 async function fetchImageAsFile(url: string, fileName: string) {
-  const response = await fetch(url);
+  const response = await fetch(normalizeImageUrl(url));
   if (!response.ok) {
     throw new Error("读取结果图失败");
   }
@@ -164,7 +165,7 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
       taskId: task.id,
       status: "success",
       b64_json: first.b64_json,
-      url: first.url,
+      url: first.url ? normalizeImageUrl(first.url) : first.url,
       revised_prompt: first.revised_prompt,
       error: undefined,
     };

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Clock3, LoaderCircle, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { normalizeImageUrl } from "@/lib/image-url";
 import { cn } from "@/lib/utils";
 import type { ImageConversation, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
 
@@ -25,7 +26,7 @@ function getStoredImageSrc(image: StoredImage) {
   if (image.b64_json) {
     return `data:image/png;base64,${image.b64_json}`;
   }
-  return image.url || "";
+  return normalizeImageUrl(image.url || "");
 }
 
 export function ImageResults({

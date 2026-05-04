@@ -4,6 +4,7 @@ import { useCallback, useEffect } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronLeft, ChevronRight, Download, X } from "lucide-react";
 
+import { normalizeImageUrl } from "@/lib/image-url";
 import { cn } from "@/lib/utils";
 
 type LightboxImage = {
@@ -29,6 +30,7 @@ export function ImageLightbox({
   onIndexChange,
 }: ImageLightboxProps) {
   const current = images[currentIndex];
+  const currentSrc = current ? normalizeImageUrl(current.src) : "";
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < images.length - 1;
 
@@ -60,10 +62,10 @@ export function ImageLightbox({
   const handleDownload = useCallback(() => {
     if (!current) return;
     const link = document.createElement("a");
-    link.href = current.src;
+    link.href = currentSrc;
     link.download = `image-${current.id}.png`;
     link.click();
-  }, [current]);
+  }, [current, currentSrc]);
 
   if (!current) return null;
 
@@ -123,7 +125,7 @@ export function ImageLightbox({
             onClick={() => onOpenChange(false)}
           >
             <img
-              src={current.src}
+              src={currentSrc}
               alt=""
               className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain"
               onClick={(e) => e.stopPropagation()}

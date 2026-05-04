@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event, Thread
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import HTTPException, Request
 
@@ -46,8 +47,94 @@ def require_admin(authorization: str | None) -> dict[str, object]:
     return identity
 
 
+def _header_value(request: Request, name: str) -> str:
+    headers = getattr(request, "headers", {}) or {}
+    value = headers.get(name) or headers.get(name.lower())
+    return str(value or "").strip()
+
+
+def _first_header_value(request: Request, name: str) -> str:
+    return _header_value(request, name).split(",", 1)[0].strip()
+
+
+def _forwarded_value(request: Request, name: str) -> str:
+    forwarded = _first_header_value(request, "forwarded")
+    if not forwarded:
+        return ""
+    for part in forwarded.split(";"):
+        key, _, value = part.strip().partition("=")
+        if key.lower() == name:
+            return value.strip().strip('"')
+    return ""
+
+
+def _valid_url_scheme(value: str) -> str:
+    scheme = value.strip().lower()
+    return scheme if scheme in {"http", "https"} else ""
+
+
+def _scheme_from_url_header(request: Request, name: str) -> str:
+    value = _first_header_value(request, name)
+    if not value:
+        return ""
+    return _valid_url_scheme(urlsplit(value).scheme)
+
+
+def _public_request_scheme(request: Request) -> str:
+    forwarded_proto = _valid_url_scheme(_forwarded_value(request, "proto"))
+    if forwarded_proto:
+        return forwarded_proto
+
+    forwarded_proto = _valid_url_scheme(_first_header_value(request, "x-forwarded-proto"))
+    if forwarded_proto:
+        return forwarded_proto
+
+    forwarded_ssl = _first_header_value(request, "x-forwarded-ssl").lower()
+    if forwarded_ssl in {"on", "1", "true"}:
+        return "https"
+
+    url_scheme = _valid_url_scheme(_first_header_value(request, "x-url-scheme"))
+    if url_scheme:
+        return url_scheme
+
+    origin_scheme = _scheme_from_url_header(request, "origin")
+    if origin_scheme:
+        return origin_scheme
+
+    referer_scheme = _scheme_from_url_header(request, "referer")
+    if referer_scheme:
+        return referer_scheme
+
+    return _valid_url_scheme(str(request.url.scheme or "")) or "http"
+
+
+def _public_request_host(request: Request) -> str:
+    return (
+        _forwarded_value(request, "host")
+        or _first_header_value(request, "x-forwarded-host")
+        or _first_header_value(request, "host")
+        or str(request.url.netloc or "")
+    ).strip()
+
+
+def _upgrade_same_host_https(base_url: str, request: Request) -> str:
+    if _public_request_scheme(request) != "https":
+        return base_url
+
+    parsed = urlsplit(base_url)
+    public_host = _public_request_host(request).lower()
+    if parsed.scheme != "http" or parsed.netloc.lower() != public_host:
+        return base_url
+
+    return urlunsplit(("https", parsed.netloc, parsed.path, parsed.query, parsed.fragment)).rstrip("/")
+
+
 def resolve_image_base_url(request: Request) -> str:
-    return config.base_url or f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+    configured_base_url = str(config.base_url or "").strip().rstrip("/")
+    if configured_base_url:
+        return _upgrade_same_host_https(configured_base_url, request)
+
+    return f"{_public_request_scheme(request)}://{_public_request_host(request)}"
 
 
 def raise_image_quota_error(exc: Exception) -> None:

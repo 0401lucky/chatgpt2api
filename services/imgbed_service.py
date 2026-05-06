@@ -4,7 +4,7 @@ import hashlib
 import time
 from pathlib import Path
 
-from curl_cffi import requests
+from curl_cffi import CurlMime, requests
 
 from services.config import config
 
@@ -71,15 +71,24 @@ def _upload_to_imgbed(
         "uploadNameType": "default",
         "autoRetry": "true",
     }
-    files = {"file": (filename, image_data, "image/png")}
-
-    response = requests.post(
-        url,
-        headers=headers,
-        params=params,
-        files=files,
-        timeout=timeout_seconds,
+    multipart = CurlMime()
+    multipart.addpart(
+        name="file",
+        content_type="image/png",
+        filename=filename,
+        data=image_data,
     )
+
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            params=params,
+            multipart=multipart,
+            timeout=timeout_seconds,
+        )
+    finally:
+        multipart.close()
     response.raise_for_status()
 
     payload = response.json()

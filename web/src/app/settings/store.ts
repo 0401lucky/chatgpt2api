@@ -26,6 +26,7 @@ import {
   type BackupState,
   type CPAPool,
   type CPARemoteFile,
+  type ImgbedSettings,
   type RegisterConfig,
   type SettingsConfig,
 } from "@/lib/api";
@@ -105,6 +106,19 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
         images: Boolean(backup.include?.images ?? false),
       },
     },
+    imgbed: normalizeImgbed(config.imgbed),
+  };
+}
+
+function normalizeImgbed(value: unknown): ImgbedSettings {
+  const source = (typeof value === "object" && value ? value : {}) as Partial<ImgbedSettings>;
+  return {
+    enabled: Boolean(source.enabled),
+    base_url: String(source.base_url || ""),
+    api_token: String(source.api_token || ""),
+    folder_prefix: String(source.folder_prefix || "chatgpt2api"),
+    timeout_seconds: Number(source.timeout_seconds || 30),
+    fallback_to_local: source.fallback_to_local !== false,
   };
 }
 
@@ -183,6 +197,7 @@ type SettingsStore = {
   setAIReviewField: (key: "enabled" | "base_url" | "api_key" | "model" | "prompt", value: string | boolean) => void;
   setBackupField: (key: keyof BackupSettings, value: string | boolean) => void;
   setBackupInclude: (key: keyof BackupSettings["include"], value: boolean) => void;
+  setImgbedField: (key: keyof ImgbedSettings, value: string | boolean | number) => void;
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
@@ -457,6 +472,23 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
               ...state.config.backup.include,
               [key]: value,
             },
+          },
+        },
+      };
+    });
+  },
+
+  setImgbedField: (key, value) => {
+    set((state) => {
+      if (!state.config?.imgbed) {
+        return {};
+      }
+      return {
+        config: {
+          ...state.config,
+          imgbed: {
+            ...state.config.imgbed,
+            [key]: value,
           },
         },
       };

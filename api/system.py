@@ -12,6 +12,7 @@ from services.backup_service import BackupError, backup_service
 from services.config import config
 from services.image_service import delete_images, get_thumbnail_response, list_images
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
+from services.imgbed_service import test_imgbed_connection
 from services.log_service import log_service
 from services.proxy_service import test_proxy
 
@@ -22,6 +23,13 @@ class SettingsUpdateRequest(BaseModel):
 
 class ProxyTestRequest(BaseModel):
     url: str = ""
+
+
+class ImgbedTestRequest(BaseModel):
+    base_url: str = ""
+    api_token: str = ""
+    folder_prefix: str = ""
+    timeout_seconds: int | None = None
 
 
 class ImageDeleteRequest(BaseModel):
@@ -115,6 +123,27 @@ def create_router(app_version: str) -> APIRouter:
         try:
             return {"result": await run_in_threadpool(backup_service.test_connection)}
         except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/imgbed/test")
+    async def test_imgbed_endpoint(body: ImgbedTestRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        saved = config.get_imgbed_settings(reveal_secrets=True)
+        cleaned_token = (body.api_token or "").strip()
+        merged = {
+            "enabled": True,
+            "base_url": (body.base_url or "").strip().rstrip("/") or saved.get("base_url", ""),
+            "api_token": saved.get("api_token", "") if cleaned_token in {"", "********"} else cleaned_token,
+            "folder_prefix": (body.folder_prefix or "").strip().strip("/") or saved.get("folder_prefix", "chatgpt2api"),
+            "timeout_seconds": body.timeout_seconds or saved.get("timeout_seconds", 30),
+        }
+        if not merged["base_url"]:
+            raise HTTPException(status_code=400, detail={"error": "图床地址不能为空"})
+        if not merged["api_token"]:
+            raise HTTPException(status_code=400, detail={"error": "API Token 不能为空"})
+        try:
+            return await run_in_threadpool(test_imgbed_connection, merged)
+        except Exception as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
     @router.get("/api/backups")

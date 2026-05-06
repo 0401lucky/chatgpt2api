@@ -114,6 +114,7 @@ export type SettingsConfig = {
   log_levels?: string[];
   backup?: BackupSettings;
   backup_state?: BackupState;
+  imgbed?: ImgbedSettings;
   [key: string]: unknown;
 };
 
@@ -142,6 +143,15 @@ export type BackupSettings = {
   encrypt: boolean;
   passphrase: string;
   include: BackupInclude;
+};
+
+export type ImgbedSettings = {
+  enabled: boolean;
+  base_url: string;
+  api_token: string;
+  folder_prefix: string;
+  timeout_seconds: number | string;
+  fallback_to_local: boolean;
 };
 
 export type BackupState = {
@@ -455,6 +465,18 @@ export async function testBackupConnection() {
   return httpRequest<{ result: { ok: boolean; status: number } }>("/api/backup/test", {
     method: "POST",
     body: {},
+  });
+}
+
+export async function testImgbedConnection(payload: {
+  base_url: string;
+  api_token: string;
+  folder_prefix?: string;
+  timeout_seconds?: number;
+}) {
+  return httpRequest<{ ok: boolean; url: string }>("/api/imgbed/test", {
+    method: "POST",
+    body: payload,
   });
 }
 

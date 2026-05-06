@@ -7,6 +7,7 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 
 import { BackupSettingsCard } from "./components/backup-settings-card";
 import { ConfigCard } from "./components/config-card";
+import { ImgbedSettingsCard } from "./components/imgbed-settings-card";
 import { CPAPoolDialog } from "./components/cpa-pool-dialog";
 import { CPAPoolsCard } from "./components/cpa-pools-card";
 import { ImportBrowserDialog } from "./components/import-browser-dialog";
@@ -66,6 +67,7 @@ function SettingsPageContent() {
       <SettingsHeader />
       <section className="space-y-6">
         <ConfigCard />
+        <ImgbedSettingsCard />
         <BackupSettingsCard />
         <UserKeysCard />
         <CPAPoolsCard />

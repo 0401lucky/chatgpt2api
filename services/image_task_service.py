@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from services.config import DATA_DIR, config
+from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 
@@ -232,11 +233,28 @@ class ImageTaskService:
                 message = _clean(result.get("message")) or "image task returned no image data"
                 raise RuntimeError(message)
             self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
-            self._log_call(identity, mode, model, started, "调用完成", urls=_collect_image_urls(data))
+            self._log_call(
+                identity,
+                mode,
+                model,
+                started,
+                "调用完成",
+                request_preview=request_text(payload.get("prompt")),
+                urls=_collect_image_urls(data),
+            )
         except Exception as exc:
             error_message = str(exc) or "image task failed"
             self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[])
-            self._log_call(identity, mode, model, started, "调用失败", status="failed", error=error_message)
+            self._log_call(
+                identity,
+                mode,
+                model,
+                started,
+                "调用失败",
+                request_preview=request_text(payload.get("prompt")),
+                status="failed",
+                error=error_message,
+            )
 
     def _log_call(
         self,
@@ -246,6 +264,7 @@ class ImageTaskService:
         started: float,
         suffix: str,
         *,
+        request_preview: str = "",
         status: str = "success",
         error: str = "",
         urls: list[str] | None = None,
@@ -263,6 +282,8 @@ class ImageTaskService:
             "duration_ms": int((time.time() - started) * 1000),
             "status": status,
         }
+        if request_preview:
+            detail["request_text"] = request_preview
         if error:
             detail["error"] = error
         if urls:

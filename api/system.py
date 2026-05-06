@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
+from services.backup_service import BackupError, backup_service
 from services.config import config
 from services.image_service import delete_images, get_thumbnail_response, list_images
+from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
 
@@ -24,6 +29,15 @@ class ImageDeleteRequest(BaseModel):
     start_date: str = ""
     end_date: str = ""
     all_matching: bool = False
+
+class ImageTagsRequest(BaseModel):
+    path: str
+    tags: list[str]
+
+class LogDeleteRequest(BaseModel):
+    ids: list[str] = []
+class BackupDeleteRequest(BaseModel):
+    key: str = ""
 
 
 def create_router(app_version: str) -> APIRouter:
@@ -73,6 +87,11 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         return {"items": log_service.list(type=type.strip(), start_date=start_date.strip(), end_date=end_date.strip())}
 
+    @router.post("/api/logs/delete")
+    async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return log_service.delete(body.ids)
+
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -89,5 +108,90 @@ def create_router(app_version: str) -> APIRouter:
             "backend": storage.get_backend_info(),
             "health": storage.health_check(),
         }
+
+    @router.post("/api/backup/test")
+    async def test_backup_connection(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"result": await run_in_threadpool(backup_service.test_connection)}
+        except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.get("/api/backups")
+    async def get_backups(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {
+                "items": await run_in_threadpool(backup_service.list_backups),
+                "state": backup_service.get_status(),
+                "settings": backup_service.get_settings(),
+            }
+        except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/backups/run")
+    async def run_backup_endpoint(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"result": await run_in_threadpool(backup_service.run_backup)}
+        except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/backups/delete")
+    async def delete_backup_endpoint(body: BackupDeleteRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            await run_in_threadpool(backup_service.delete_backup, body.key)
+            return {"ok": True}
+        except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.get("/api/backups/detail")
+    async def get_backup_detail(key: str = "", authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"item": await run_in_threadpool(backup_service.get_backup_detail, key)}
+        except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.get("/api/backups/download")
+    async def download_backup_endpoint(key: str = "", authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            item = await run_in_threadpool(backup_service.download_backup, key)
+        except BackupError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        filename = str(item.get("name") or "backup.bin")
+        quoted = quote(filename)
+        headers = {
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}",
+            "Content-Length": str(int(item.get("size") or 0)),
+        }
+        return Response(
+            content=bytes(item.get("payload") or b""),
+            media_type=str(item.get("content_type") or "application/octet-stream"),
+            headers=headers,
+        )
+
+
+    @router.get("/api/images/tags")
+    async def list_image_tags(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"tags": get_all_tags()}
+
+    @router.post("/api/images/tags")
+    async def update_image_tags(body: ImageTagsRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        rel = body.path.strip().lstrip("/")
+        if not rel:
+            raise HTTPException(status_code=400, detail={"error": "path is required"})
+        tags = set_tags(rel, body.tags)
+        return {"ok": True, "tags": tags}
+
+    @router.delete("/api/images/tags/{tag}")
+    async def delete_image_tag(tag: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        count = delete_tag(tag)
+        return {"ok": True, "removed_from": count}
 
     return router

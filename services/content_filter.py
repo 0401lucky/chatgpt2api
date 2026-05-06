@@ -48,8 +48,7 @@ def check_request(text: str) -> None:
             timeout=60,
             **proxy_settings.build_session_kwargs(),
         )
-        data = response.json()
-        result = str(data["choices"][0]["message"]["content"]).strip().lower()
+        result = str(response.json()["choices"][0]["message"]["content"]).strip().lower()
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"error": f"ai review failed: {exc}"}) from exc
     if result.startswith(("allow", "pass", "true", "yes", "通过", "允许", "安全")):

@@ -1,6 +1,6 @@
 import { blobRequest, httpRequest } from "@/lib/request";
 
-export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
+export type AccountType = string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "auto" | "gpt-image-1" | "gpt-image-2" | "codex-gpt-image-2";
 export type AuthRole = "admin" | "user";
@@ -35,7 +35,7 @@ export type Account = {
   type: AccountType;
   status: AccountStatus;
   quota: number;
-  imageQuotaUnknown?: boolean;
+  image_quota_unknown?: boolean;
   email?: string | null;
   user_id?: string | null;
   limits_progress?: Array<{
@@ -44,10 +44,10 @@ export type Account = {
     reset_after?: string;
   }>;
   default_model_slug?: string | null;
-  restoreAt?: string | null;
+  restore_at?: string | null;
   success: number;
   fail: number;
-  lastUsedAt: string | null;
+  last_used_at?: string | null;
 };
 
 type AccountListResponse = {
@@ -96,6 +96,7 @@ export type ApiImageHistoryDeleteResponse = {
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
+  global_system_prompt?: string;
   sensitive_words?: string[];
   ai_review?: {
     enabled?: boolean;
@@ -107,13 +108,82 @@ export type SettingsConfig = {
   refresh_account_interval_minute?: number | string;
   image_retention_days?: number | string;
   image_poll_timeout_secs?: number | string;
+  image_account_concurrency?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
+  backup?: BackupSettings;
+  backup_state?: BackupState;
   [key: string]: unknown;
 };
 
+export type BackupInclude = {
+  config: boolean;
+  register: boolean;
+  cpa: boolean;
+  sub2api: boolean;
+  logs: boolean;
+  image_tasks: boolean;
+  accounts_snapshot: boolean;
+  auth_keys_snapshot: boolean;
+  images: boolean;
+};
+
+export type BackupSettings = {
+  enabled: boolean;
+  provider: "cloudflare_r2" | string;
+  account_id: string;
+  access_key_id: string;
+  secret_access_key: string;
+  bucket: string;
+  prefix: string;
+  interval_minutes: number | string;
+  rotation_keep: number | string;
+  encrypt: boolean;
+  passphrase: string;
+  include: BackupInclude;
+};
+
+export type BackupState = {
+  running: boolean;
+  last_started_at?: string | null;
+  last_finished_at?: string | null;
+  last_status?: string;
+  last_error?: string | null;
+  last_object_key?: string | null;
+};
+
+export type BackupItem = {
+  key: string;
+  name: string;
+  size: number;
+  updated_at?: string | null;
+  encrypted: boolean;
+};
+
+export type BackupDetail = {
+  key: string;
+  name: string;
+  encrypted: boolean;
+  created_at?: string | null;
+  trigger?: string | null;
+  app_version?: string | null;
+  storage_backend?: Record<string, unknown> | null;
+  files: Array<{
+    name: string;
+    exists: boolean;
+    content_type?: string;
+    size: number;
+    sha256?: string;
+  }>;
+  snapshots: Array<{
+    name: string;
+    count: number;
+  }>;
+};
+
 export type ManagedImage = {
+  rel: string;
   path?: string;
   name: string;
   date: string;
@@ -123,9 +193,11 @@ export type ManagedImage = {
   created_at: string;
   width?: number;
   height?: number;
+  tags?: string[];
 };
 
 export type SystemLog = {
+  id: string;
   time: string;
   type: "call" | "account" | string;
   summary?: string;
@@ -379,6 +451,43 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
   });
 }
 
+export async function testBackupConnection() {
+  return httpRequest<{ result: { ok: boolean; status: number } }>("/api/backup/test", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function fetchBackups() {
+  return httpRequest<{ items: BackupItem[]; state: BackupState; settings: BackupSettings }>("/api/backups");
+}
+
+export async function runBackupNow() {
+  return httpRequest<{ result: { key: string; size: number; encrypted: boolean } }>("/api/backups/run", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function deleteBackup(key: string) {
+  return httpRequest<{ ok: boolean }>("/api/backups/delete", {
+    method: "POST",
+    body: { key },
+  });
+}
+
+export async function fetchBackupDetail(key: string) {
+  const params = new URLSearchParams();
+  params.set("key", key);
+  return httpRequest<{ item: BackupDetail }>(`/api/backups/detail?${params.toString()}`);
+}
+
+export function getBackupDownloadUrl(key: string) {
+  const params = new URLSearchParams();
+  params.set("key", key);
+  return `/api/backups/download?${params.toString()}`;
+}
+
 export async function fetchManagedImages(filters: { start_date?: string; end_date?: string }) {
   const params = new URLSearchParams();
   if (filters.start_date) params.set("start_date", filters.start_date);
@@ -392,12 +501,36 @@ export async function deleteManagedImages(body: { paths?: string[]; start_date?:
   return httpRequest<{ removed: number }>("/api/images/delete", { method: "POST", body });
 }
 
+export async function fetchImageTags() {
+  return httpRequest<{ tags: string[] }>("/api/images/tags");
+}
+
+export async function setImageTags(path: string, tags: string[]) {
+  return httpRequest<{ ok: boolean; tags: string[] }>("/api/images/tags", {
+    method: "POST",
+    body: { path, tags },
+  });
+}
+
+export async function deleteImageTag(tag: string) {
+  return httpRequest<{ ok: boolean; removed_from: number }>(`/api/images/tags/${encodeURIComponent(tag)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function fetchSystemLogs(filters: { type?: string; start_date?: string; end_date?: string }) {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
+export async function deleteSystemLogs(ids: string[]) {
+  return httpRequest<{ removed: number }>("/api/logs/delete", {
+    method: "POST",
+    body: { ids },
+  });
 }
 
 export async function fetchUserKeys() {

@@ -92,7 +92,11 @@ const metricCards = [
 ] as const;
 
 function isUnlimitedImageQuotaAccount(account: Account) {
-  return account.type === "Pro" || account.type === "ProLite";
+  return account.type === "pro" || account.type === "prolite";
+}
+
+function imageQuotaUnknown(account: Account) {
+  return Boolean(account.image_quota_unknown);
 }
 
 function formatCompact(value: number) {
@@ -106,7 +110,7 @@ function formatQuota(account: Account) {
   if (isUnlimitedImageQuotaAccount(account)) {
     return "∞";
   }
-  if (account.imageQuotaUnknown) {
+  if (imageQuotaUnknown(account)) {
     return "未知";
   }
   return String(Math.max(0, account.quota));
@@ -141,7 +145,7 @@ function formatQuotaSummary(accounts: Account[]) {
   if (availableAccounts.some(isUnlimitedImageQuotaAccount)) {
     return "∞";
   }
-  if (availableAccounts.some((account) => account.imageQuotaUnknown)) {
+  if (availableAccounts.some(imageQuotaUnknown)) {
     return "未知";
   }
   return formatCompact(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
@@ -185,7 +189,7 @@ function AccountsPageContent() {
     }
     try {
       const data = await fetchAccounts();
-      setAccounts(normalizeAccounts(data.items));
+      setAccounts(data.items);
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载账户失败";
@@ -370,7 +374,7 @@ function AccountsPageContent() {
           <AccountImportDialog
             disabled={isLoading || isRefreshing || isDeleting}
             onImported={(items) => {
-              setAccounts(normalizeAccounts(items));
+              setAccounts(items);
               setSelectedIds([]);
               setPage(1);
             }}
@@ -383,7 +387,7 @@ function AccountsPageContent() {
           <DialogHeader className="gap-2">
             <DialogTitle>编辑账户</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              手动修改账号状态、类型和额度。
+              手动修改账号状态。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -500,7 +504,7 @@ function AccountsPageContent() {
             <Select
               value={typeFilter}
               onValueChange={(value) => {
-                setTypeFilter(value as AccountType | "all");
+                setTypeFilter(value);
                 setPage(1);
               }}
             >
@@ -664,7 +668,7 @@ function AccountsPageContent() {
                         </td>
                         <td className="px-4 py-3 text-xs leading-5 text-stone-500">
                           {(() => {
-                            const restore = formatRestoreAt(account.restoreAt);
+                            const restore = formatRestoreAt(account.restore_at);
                             return (
                               <div className="space-y-0.5">
                                 {restore.relative ? <div className="font-medium text-stone-700">{restore.relative}</div> : null}

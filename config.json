@@ -13,14 +13,38 @@
   ],
   "proxy": "",
   "base_url": "",
-  "sensitive_words": [
-    "色情"
-  ],
+  "sensitive_words": [],
+  "global_system_prompt": "",
   "ai_review": {
     "enabled": false,
     "base_url": "",
     "api_key": "",
-    "model": "gpt-5.4-mini",
-    "prompt": "判断用户请求是否允许。只回答 ALLOW 或 REJECT。"
-  }
+    "model": "",
+    "prompt": ""
+  },
+  "backup": {
+    "enabled": false,
+    "provider": "cloudflare_r2",
+    "account_id": "",
+    "access_key_id": "",
+    "secret_access_key": "",
+    "bucket": "",
+    "prefix": "backups",
+    "interval_minutes": 1440,
+    "rotation_keep": 10,
+    "encrypt": false,
+    "passphrase": "",
+    "include": {
+      "config": true,
+      "register": true,
+      "cpa": true,
+      "sub2api": true,
+      "logs": true,
+      "image_tasks": true,
+      "accounts_snapshot": true,
+      "auth_keys_snapshot": true,
+      "images": false
+    }
+  },
+  "image_account_concurrency": 3
 }

@@ -2,6 +2,7 @@ import base64
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -17,6 +18,10 @@ from utils.helper import ensure_ok, iter_sse_payloads, new_uuid
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
 from utils.turnstile import solve_turnstile_token
+
+
+class InvalidAccessTokenError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -134,6 +139,93 @@ class OpenAIBackendAPI:
         if extra:
             headers.update(extra)
         return headers
+
+    @staticmethod
+    def _extract_quota_and_restore_at(limits_progress: list[Any]) -> tuple[int, str | None, bool]:
+        for item in limits_progress:
+            if isinstance(item, dict) and item.get("feature_name") == "image_gen":
+                return int(item.get("remaining") or 0), str(item.get("reset_after") or "") or None, False
+        return 0, None, True
+
+    def _get_me(self) -> Dict[str, Any]:
+        path = "/backend-api/me"
+        response = self.session.get(self.base_url + path, headers=self._headers(path), timeout=20)
+        if response.status_code != 200:
+            if response.status_code == 401:
+                raise InvalidAccessTokenError(f"{path} failed: HTTP {response.status_code}")
+            raise RuntimeError(f"{path} failed: HTTP {response.status_code}")
+        return response.json()
+
+    def _get_conversation_init(self) -> Dict[str, Any]:
+        path = "/backend-api/conversation/init"
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._headers(path, {"Content-Type": "application/json"}),
+            json={
+                "gizmo_id": None,
+                "requested_default_model": None,
+                "conversation_id": None,
+                "timezone_offset_min": -480,
+            },
+            timeout=20,
+        )
+        if response.status_code != 200:
+            if response.status_code == 401:
+                raise InvalidAccessTokenError(f"{path} failed: HTTP {response.status_code}")
+            raise RuntimeError(f"{path} failed: HTTP {response.status_code}")
+        return response.json()
+
+    def _get_default_account(self) -> Dict[str, Any]:
+        route = "/backend-api/accounts/check/v4-2023-04-27"
+        response = self.session.get(self.base_url + route + "?timezone_offset_min=-480", headers=self._headers(route),
+                                    timeout=20)
+        if response.status_code != 200:
+            if response.status_code == 401:
+                raise InvalidAccessTokenError(f"{route} failed: HTTP {response.status_code}")
+            raise RuntimeError(f"/backend-api/accounts/check failed: HTTP {response.status_code}")
+        payload = response.json()
+        logger.debug({"event": "backend_user_info_account_payload", "account_payload": payload})
+        return ((payload.get("accounts") or {}).get("default") or {}).get("account") or {}
+
+    def get_user_info(self) -> Dict[str, Any]:
+        """获取当前 token 的账号信息。"""
+        if not self.access_token:
+            raise RuntimeError("access_token is required")
+        logger.debug({"event": "backend_user_info_start"})
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            me_future = executor.submit(self._get_me)
+            init_future = executor.submit(self._get_conversation_init)
+            account_future = executor.submit(self._get_default_account)
+            me_payload, init_payload, default_account = me_future.result(), init_future.result(), account_future.result()
+
+        plan_type = str(default_account.get("plan_type") or "free")
+
+        limits_progress = init_payload.get("limits_progress")
+        limits_progress = limits_progress if isinstance(limits_progress, list) else []
+        quota, restore_at, image_quota_unknown = self._extract_quota_and_restore_at(limits_progress)
+        result = {
+            "email": me_payload.get("email"),
+            "user_id": me_payload.get("id"),
+            "type": plan_type,
+            "quota": quota,
+            "image_quota_unknown": image_quota_unknown,
+            "limits_progress": limits_progress,
+            "default_model_slug": init_payload.get("default_model_slug"),
+            "restore_at": restore_at,
+            "status": "正常" if image_quota_unknown and plan_type.lower() != "free" else ("限流" if quota == 0 else "正常"),
+        }
+        logger.debug({
+            "event": "backend_user_info_result",
+            "email": result.get("email"),
+            "user_id": result.get("user_id"),
+            "type": result.get("type"),
+            "quota": result.get("quota"),
+            "image_quota_unknown": result.get("image_quota_unknown"),
+            "default_model_slug": result.get("default_model_slug"),
+            "restore_at": result.get("restore_at"),
+            "status": result.get("status"),
+        })
+        return result
 
     def _bootstrap_headers(self) -> Dict[str, str]:
         """构造首页预热请求头。"""
@@ -562,14 +654,18 @@ class OpenAIBackendAPI:
                 for sediment_id in record["sediment_ids"]:
                     if sediment_id not in sediment_ids:
                         sediment_ids.append(sediment_id)
-            logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt, "file_ids": file_ids, "sediment_ids": sediment_ids})
+            logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
+                          "file_ids": file_ids, "sediment_ids": sediment_ids})
             if file_ids:
-                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": file_ids, "sediment_ids": sediment_ids})
+                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": file_ids,
+                             "sediment_ids": sediment_ids})
                 return file_ids, sediment_ids
             if sediment_ids:
-                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": [], "sediment_ids": sediment_ids})
+                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": [],
+                             "sediment_ids": sediment_ids})
                 return [], sediment_ids
-            logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id, "elapsed_secs": round(time.time() - start, 1)})
+            logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
+                          "elapsed_secs": round(time.time() - start, 1)})
             time.sleep(4)
         logger.info({"event": "image_poll_timeout", "conversation_id": conversation_id, "timeout_secs": timeout_secs})
         return [], []
@@ -675,7 +771,8 @@ class OpenAIBackendAPI:
         sediment_ids = list(sediment_ids)
         if poll and conversation_id and not file_ids and not sediment_ids:
             logger.info({"event": "image_resolve_poll_needed", "conversation_id": conversation_id})
-            polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id, config.image_poll_timeout_secs)
+            polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id,
+                                                                            config.image_poll_timeout_secs)
             file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
             sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
         return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)

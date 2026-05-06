@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from api import accounts, ai, image_tasks, register, system
 from api.support import resolve_web_asset, start_limited_account_watcher
 from services.account_service import account_service
+from services.backup_service import backup_service
 from services.chatgpt_service import ChatGPTService
 from services.config import config
 
@@ -22,6 +23,7 @@ def create_app() -> FastAPI:
     async def lifespan(_: FastAPI):
         stop_event = Event()
         thread = start_limited_account_watcher(stop_event)
+        backup_service.start()
         cleanup_old_images = getattr(config, "cleanup_old_images", None)
         if callable(cleanup_old_images):
             cleanup_old_images()
@@ -30,6 +32,7 @@ def create_app() -> FastAPI:
         finally:
             stop_event.set()
             thread.join(timeout=1)
+            backup_service.stop()
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
     app.add_middleware(

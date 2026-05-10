@@ -61,7 +61,7 @@ function getTouchDistance(touches: React.TouchList) {
   return Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY);
 }
 
-function getTouchCenter(touches: TouchList) {
+function getTouchCenter(touches: React.TouchList) {
   const first = touches[0];
   const second = touches[1];
   return {

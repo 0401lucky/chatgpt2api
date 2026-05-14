@@ -43,7 +43,7 @@ def _config(mail_config: dict) -> dict:
 
 
 def _random_mailbox_name() -> str:
-    return f"{''.join(random.choices(string.ascii_lowercase, k=5))}{''.join(random.choices(string.digits, k=random.randint(1, 3)))}{''.join(random.choices(string.ascii_lowercase, k=random.randint(1, 3)))}"
+    return random.choice(string.ascii_lowercase) + "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(13, 17)))
 
 
 def _random_subdomain_label() -> str:

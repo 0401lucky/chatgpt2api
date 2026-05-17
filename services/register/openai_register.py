@@ -21,7 +21,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from services.account_service import account_service
-from services.register import mail_provider
+from services.register import domain_reputation, mail_provider
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 base_dir = Path(__file__).resolve().parent
@@ -186,6 +186,42 @@ def create_mailbox(username: str | None = None) -> dict:
 
 def wait_for_code(mailbox: dict) -> str | None:
     return mail_provider.wait_for_code(config["mail"], mailbox)
+
+
+class RegisterAttemptError(RuntimeError):
+    def __init__(self, reason: str, mailbox: dict | None = None):
+        super().__init__(reason)
+        self.reason = str(reason)
+        self.mailbox = dict(mailbox or {})
+
+    @property
+    def mail_provider(self) -> str:
+        return str(self.mailbox.get("provider") or "").strip()
+
+    @property
+    def mail_domain(self) -> str:
+        domain = str(self.mailbox.get("domain") or "").strip().lower()
+        if domain:
+            return domain
+        address = str(self.mailbox.get("address") or "").strip().lower()
+        return address.rsplit("@", 1)[-1] if "@" in address else ""
+
+
+def _record_mail_success(result: dict) -> None:
+    provider = str(result.get("mail_provider") or "").strip()
+    domain = str(result.get("mail_domain") or "").strip()
+    if provider and domain:
+        domain_reputation.store.record_success(provider, domain)
+
+
+def _record_mail_failure(error: Exception) -> dict:
+    if not isinstance(error, RegisterAttemptError):
+        return {}
+    provider = error.mail_provider
+    domain = error.mail_domain
+    if not provider or not domain:
+        return {}
+    return domain_reputation.store.record_failure(provider, domain, error.reason)
 
 
 class SentinelTokenGenerator:
@@ -574,33 +610,44 @@ class PlatformRegistrar:
         return tokens
 
     def register(self, index: int) -> dict:
-        step(index, "开始创建邮箱")
-        mailbox = create_mailbox()
-        email = str(mailbox.get("address") or "").strip()
-        if not email:
-            raise RuntimeError("邮箱服务未返回 address")
-        step(index, f"邮箱创建完成: {email}")
-        password = _random_password()
-        first_name, last_name = _random_name()
-        self._platform_authorize(email, index)
-        self._register_user(email, password, index)
-        self._send_otp(index)
-        step(index, "开始等待注册验证码")
-        code = wait_for_code(mailbox)
-        if not code:
-            raise RuntimeError("等待注册验证码超时")
-        step(index, f"收到注册验证码: {code}")
-        self._validate_otp(code, index)
-        self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
-        tokens = self._login_and_exchange_tokens(email, password, mailbox, index)
-        return {
-            "email": email,
-            "password": password,
-            "access_token": str(tokens.get("access_token") or "").strip(),
-            "refresh_token": str(tokens.get("refresh_token") or "").strip(),
-            "id_token": str(tokens.get("id_token") or "").strip(),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
+        mailbox: dict = {}
+        try:
+            step(index, "开始创建邮箱")
+            mailbox = create_mailbox()
+            email = str(mailbox.get("address") or "").strip()
+            if not email:
+                raise RuntimeError("邮箱服务未返回 address")
+            step(index, f"邮箱创建完成: {email}")
+            password = _random_password()
+            first_name, last_name = _random_name()
+            self._platform_authorize(email, index)
+            self._register_user(email, password, index)
+            self._send_otp(index)
+            step(index, "开始等待注册验证码")
+            code = wait_for_code(mailbox)
+            if not code:
+                raise RuntimeError("等待注册验证码超时")
+            step(index, f"收到注册验证码: {code}")
+            self._validate_otp(code, index)
+            self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
+            tokens = self._login_and_exchange_tokens(email, password, mailbox, index)
+            return {
+                "email": email,
+                "password": password,
+                "access_token": str(tokens.get("access_token") or "").strip(),
+                "refresh_token": str(tokens.get("refresh_token") or "").strip(),
+                "id_token": str(tokens.get("id_token") or "").strip(),
+                "mail_provider": str(mailbox.get("provider") or "").strip(),
+                "mail_provider_ref": str(mailbox.get("provider_ref") or "").strip(),
+                "mail_domain": str(mailbox.get("domain") or (email.rsplit("@", 1)[-1] if "@" in email else "")).strip().lower(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except RegisterAttemptError:
+            raise
+        except Exception as exc:
+            if mailbox:
+                raise RegisterAttemptError(str(exc), mailbox) from exc
+            raise
 
 
 def worker(index: int) -> dict:
@@ -609,6 +656,7 @@ def worker(index: int) -> dict:
     try:
         step(index, "任务启动")
         result = registrar.register(index)
+        _record_mail_success(result)
         cost = time.time() - start
         access_token = str(result["access_token"])
         account_service.add_accounts([result])
@@ -621,6 +669,9 @@ def worker(index: int) -> dict:
         return {"ok": True, "index": index, "result": result}
     except Exception as e:
         cost = time.time() - start
+        reputation = _record_mail_failure(e)
+        if reputation.get("disabled_changed") and isinstance(e, RegisterAttemptError):
+            log(f"邮箱域名已自动拉黑: {e.mail_domain}，原因: {reputation.get('bucket')}", "yellow")
         with stats_lock:
             stats["done"] += 1
             stats["fail"] += 1

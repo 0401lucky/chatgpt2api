@@ -594,7 +594,7 @@ class PlatformRegistrar:
 
     def _login_and_exchange_tokens(self, email: str, password: str, mailbox: dict, index: int) -> dict:
         step(index, "开始独立登录换 token")
-        login_session = create_session("")
+        login_session = create_session(config["proxy"])
         login_device_id = str(uuid.uuid4())
         login_session.cookies.set("oai-did", login_device_id, domain=".auth.openai.com")
         login_session.cookies.set("oai-did", login_device_id, domain="auth.openai.com")
@@ -631,7 +631,12 @@ class PlatformRegistrar:
             h.update(_make_trace_headers())
             return h
 
-        resp, error = request_with_local_retry(login_session, "get", f"{auth_base}/api/accounts/authorize?{urlencode(params)}", headers=_login_nav_headers(f"{platform_base}/"), allow_redirects=True, verify=False)
+        resp, error = request_with_local_retry(
+            login_session, "get",
+            f"{auth_base}/api/accounts/authorize?{urlencode(params)}",
+            headers=_login_nav_headers(f"{platform_base}/"),
+            allow_redirects=True, verify=False
+        )
         if resp is None:
             raise RuntimeError(error or "platform_login_authorize_failed")
         step(index, "登录 authorize 完成")
@@ -643,6 +648,51 @@ class PlatformRegistrar:
                 login_session.close()
                 return tokens
             step(index, "authorize 已返回 OAuth code，但 token 换取失败，继续尝试密码校验", "yellow")
+
+        # 提交邮箱（原样，不带 state）
+        def _do_authorize_continue():
+            h = _login_json_headers(f"{auth_base}/log-in?usernameKind=email")
+            h["openai-sentinel-token"] = build_sentinel_token(login_session, login_device_id, "authorize_continue")
+            return request_with_local_retry(
+                login_session, "post",
+                f"{auth_base}/api/accounts/authorize/continue",
+                json={"username": {"kind": "email", "value": email}},
+                headers=h,
+                allow_redirects=False,
+                verify=False
+            )
+
+        step(index, "开始提交邮箱")
+        resp, error = _do_authorize_continue()
+        if resp is not None and resp.status_code == 409:
+            step(index, "邮箱提交 invalid_state，重新 authorize 后重试")
+            # 再次清除 cookie 并重新 authorize
+            for cookie in list(login_session.cookies):
+                if 'auth.openai.com' in cookie.domain:
+                    login_session.cookies.clear(domain=cookie.domain, path=cookie.path, name=cookie.name)
+            login_session.cookies.set("oai-did", login_device_id, domain=".auth.openai.com")
+            login_session.cookies.set("oai-did", login_device_id, domain="auth.openai.com")
+            resp, error = request_with_local_retry(
+                login_session, "get",
+                f"{auth_base}/api/accounts/authorize?{urlencode(params)}",
+                headers=_login_nav_headers(f"{platform_base}/"),
+                allow_redirects=True, verify=False
+            )
+            if resp is None:
+                raise RuntimeError(error or "platform_login_authorize_retry_failed")
+            resp, error = _do_authorize_continue()
+
+        if resp is None or resp.status_code != 200:
+            data = _response_json(resp) if resp is not None else {}
+            detail = json.dumps(data, ensure_ascii=False) if data else ""
+            raise RuntimeError(
+                error or f"email_submit_http_{getattr(resp, 'status_code', 'unknown')}"
+                + (f": {detail}" if detail else "")
+            )
+        step(index, "邮箱提交完成")
+
+        # 密码验证
+        step(index, "开始密码校验")
         headers = _login_json_headers(f"{auth_base}/log-in/password")
         headers["openai-sentinel-token"] = build_sentinel_token(login_session, login_device_id, "password_verify")
         resp, error = request_with_local_retry(login_session, "post", f"{auth_base}/api/accounts/password/verify", json={"password": password}, headers=headers, allow_redirects=False, verify=False)

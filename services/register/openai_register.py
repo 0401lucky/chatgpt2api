@@ -378,6 +378,36 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
 
 
+def extract_oauth_callback_params_from_response(resp) -> dict[str, str] | None:
+    def candidates_from_response(item) -> list[str]:
+        headers = getattr(item, "headers", {}) or {}
+        return [
+            str(getattr(item, "url", "") or "").strip(),
+            str(headers.get("Location") or "").strip(),
+        ]
+
+    candidates: list[str] = []
+    for history_item in getattr(resp, "history", []) or []:
+        candidates.extend(candidates_from_response(history_item))
+    candidates.extend(candidates_from_response(resp))
+
+    for candidate in candidates:
+        callback_params = extract_oauth_callback_params_from_url(candidate)
+        if callback_params:
+            return callback_params
+    return None
+
+
+def _response_error_detail(resp) -> str:
+    if resp is None:
+        return ""
+    data = _response_json(resp)
+    if data:
+        return f", detail={json.dumps(data, ensure_ascii=False)[:800]}"
+    text = str(getattr(resp, "text", "") or "").strip()
+    return f", body={text[:800]}" if text else ""
+
+
 def extract_oauth_callback_params_from_consent_session(session: requests.Session, consent_url: str, device_id: str) -> dict[str, str] | None:
     if consent_url.startswith("/"):
         consent_url = f"{auth_base}{consent_url}"
@@ -430,10 +460,7 @@ def extract_oauth_callback_params_from_consent_session(session: requests.Session
     return extract_oauth_callback_params_from_url(str(org_resp.headers.get("Location") or "").strip())
 
 
-def exchange_platform_tokens(session: requests.Session, device_id: str, code_verifier: str, consent_url: str) -> dict | None:
-    callback_params = extract_oauth_callback_params_from_consent_session(session, consent_url, device_id)
-    if not callback_params:
-        return None
+def exchange_oauth_callback_params(code_verifier: str, callback_params: dict[str, str]) -> dict | None:
     code = str(callback_params.get("code") or "").strip()
     if not code:
         return None
@@ -460,6 +487,13 @@ def exchange_platform_tokens(session: requests.Session, device_id: str, code_ver
         "refresh_token": str(data.get("refresh_token") or "").strip(),
         "id_token": str(data.get("id_token") or "").strip(),
     }
+
+
+def exchange_platform_tokens(session: requests.Session, device_id: str, code_verifier: str, consent_url: str) -> dict | None:
+    callback_params = extract_oauth_callback_params_from_consent_session(session, consent_url, device_id)
+    if not callback_params:
+        return None
+    return exchange_oauth_callback_params(code_verifier, callback_params)
 
 
 class PlatformRegistrar:
@@ -578,11 +612,18 @@ class PlatformRegistrar:
         if resp is None:
             raise RuntimeError(error or "platform_login_authorize_failed")
         step(index, "登录 authorize 完成")
+        callback_params = extract_oauth_callback_params_from_response(resp)
+        if callback_params:
+            tokens = exchange_oauth_callback_params(code_verifier, callback_params)
+            if tokens:
+                step(index, "authorize 已返回 OAuth code，跳过密码校验")
+                return tokens
+            step(index, "authorize 已返回 OAuth code，但 token 换取失败，继续尝试密码校验", "yellow")
         headers = self._json_headers(f"{auth_base}/log-in/password")
         headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "password_verify")
         resp, error = request_with_local_retry(self.session, "post", f"{auth_base}/api/accounts/password/verify", json={"password": password}, headers=headers, allow_redirects=False, verify=False)
         if resp is None or resp.status_code != 200:
-            raise RuntimeError(error or f"password_verify_http_{getattr(resp, 'status_code', 'unknown')}")
+            raise RuntimeError(error or f"password_verify_http_{getattr(resp, 'status_code', 'unknown')}{_response_error_detail(resp)}")
         step(index, "密码校验完成")
         payload = _response_json(resp)
         continue_url = str(payload.get("continue_url") or "").strip()

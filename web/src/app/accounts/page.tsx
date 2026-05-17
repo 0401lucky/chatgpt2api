@@ -165,6 +165,46 @@ function normalizeAccounts(items: Account[]): Account[] {
   }));
 }
 
+function maskToken(token?: string) {
+  if (!token) return "—";
+  if (token.length <= 18) return token;
+  return `${token.slice(0, 16)}...${token.slice(-8)}`;
+}
+
+function renderPrivacyEmail(email?: string | null) {
+  const value = String(email || "").trim();
+  if (!value) {
+    return <span>—</span>;
+  }
+  const atIndex = value.indexOf("@");
+  if (atIndex < 0) {
+    return <span className="transition duration-150 blur-sm hover:blur-none">{value}</span>;
+  }
+  const localPart = value.slice(0, atIndex + 1);
+  const domain = value.slice(atIndex + 1);
+  return (
+    <span className="group inline-flex max-w-full items-center">
+      <span className="truncate">{localPart}</span>
+      <span className="truncate transition duration-150 blur-sm group-hover:blur-none">{domain}</span>
+    </span>
+  );
+}
+
+function downloadTokens(accounts: Account[]) {
+  const content = `${accounts.map((account) => account.access_token).join("\n")}\n`;
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `accounts-${Date.now()}.txt`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function displayAccountType(account: Account) {
+  return account.type || "Free";
+}
+
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -659,7 +699,7 @@ function AccountsPageContent() {
                           </Badge>
                         </td>
                         <td className="px-4 py-3">
-                          <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
+                          <div className="text-xs leading-5 text-stone-500">{renderPrivacyEmail(account.email)}</div>
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant="info" className="rounded-md">

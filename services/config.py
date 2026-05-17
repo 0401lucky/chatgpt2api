@@ -10,8 +10,18 @@ import time
 from services.storage.base import StorageBackend
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
-CONFIG_FILE = BASE_DIR / "config.json"
+
+
+def _resolve_path_env(env_name: str, default: Path) -> Path:
+    raw = os.getenv(env_name)
+    if not raw:
+        return default
+    expanded = Path(raw).expanduser()
+    return expanded if expanded.is_absolute() else (BASE_DIR / expanded).resolve()
+
+
+DATA_DIR = _resolve_path_env("CHATGPT2API_DATA_DIR", BASE_DIR / "data")
+CONFIG_FILE = _resolve_path_env("CHATGPT2API_CONFIG_FILE", BASE_DIR / "config.json")
 VERSION_FILE = BASE_DIR / "VERSION"
 BACKUP_STATE_FILE = DATA_DIR / "backup_state.json"
 

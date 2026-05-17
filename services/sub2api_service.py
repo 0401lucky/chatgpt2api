@@ -412,9 +412,11 @@ def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str,
     access_token = _extract_access_token(credentials)
     if not access_token:
         raise RuntimeError("missing access_token")
+    refresh_token = _clean(credentials.get("refresh_token"))
     return access_token, {
         "email": _clean(credentials.get("email")),
         "plan_type": _clean(credentials.get("plan_type")),
+        "refresh_token": refresh_token,
     }
 
 
@@ -472,7 +474,7 @@ class Sub2APIImportService:
     def _run_import(self, server_id: str, server: dict, account_ids: list[str]) -> None:
         self._update_job(server_id, status="running")
 
-        tokens: list[str] = []
+        entries: list[dict] = []
         max_workers = min(8, max(1, len(account_ids)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
@@ -482,8 +484,12 @@ class Sub2APIImportService:
             for future in as_completed(future_map):
                 account_id = future_map[future]
                 try:
-                    token, _meta = future.result()
-                    tokens.append(token)
+                    token, meta = future.result()
+                    entry: dict = {"access_token": token}
+                    refresh_token = _clean(meta.get("refresh_token")) if isinstance(meta, dict) else ""
+                    if refresh_token:
+                        entry["refresh_token"] = refresh_token
+                    entries.append(entry)
                 except Exception as exc:
                     self._append_error(server_id, account_id, str(exc) or "unknown error")
 
@@ -495,7 +501,7 @@ class Sub2APIImportService:
                     failed=failed,
                 )
 
-        if not tokens:
+        if not entries:
             current = self._config.get_import_job(server_id) or {}
             self._update_job(
                 server_id,
@@ -505,8 +511,8 @@ class Sub2APIImportService:
             )
             return
 
-        add_result = account_service.add_accounts(tokens)
-        refresh_result = account_service.refresh_accounts(tokens)
+        add_result = account_service.add_accounts(entries)
+        refresh_result = account_service.refresh_accounts([entry["access_token"] for entry in entries])
         current = self._config.get_import_job(server_id) or {}
         self._update_job(
             server_id,

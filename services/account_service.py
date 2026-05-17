@@ -18,6 +18,12 @@ from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
 
+# OpenAI Platform OAuth（与 services/register/openai_register.py 保持一致），
+# 用于在 access_token 401 时凭 refresh_token 续期。
+_PLATFORM_OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
+_PLATFORM_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+
+
 class AccountService:
     ACCOUNT_TYPE_MAP = {
         "free": "Free",
@@ -159,6 +165,7 @@ class AccountService:
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["last_used_at"] = normalized.get("last_used_at")
+        normalized["refresh_token"] = self._clean_token(normalized.get("refresh_token")) or None
         return normalized
 
     @staticmethod
@@ -280,23 +287,105 @@ class AccountService:
 
     def refresh_account_state(self, access_token: str) -> dict | None:
         token_ref = anonymize_token(access_token)
+        final_token, remote_info, error = self._fetch_with_oauth_refresh(access_token)
+        if remote_info is not None:
+            return self.update_account(final_token, remote_info)
+        print(f"[account-available] refresh token={token_ref} fail {error}")
+        if error and "/backend-api/me failed: HTTP 401" in error:
+            if self.remove_invalid_token(final_token, "refresh_account_state"):
+                return None
+            return self.update_account(
+                final_token,
+                {
+                    "status": "异常",
+                    "quota": 0,
+                },
+            )
+        return None
+
+    def _try_refresh_oauth_token(self, refresh_token: str) -> dict | None:
+        """凭 refresh_token 调用 OpenAI Platform OAuth 续期，返回新 token 信息或 None。"""
+        refresh_token = self._clean_token(refresh_token)
+        if not refresh_token:
+            return None
+        impersonate = "edge101"
+        session = Session(**proxy_settings.build_session_kwargs(impersonate=impersonate, verify=True))
         try:
-            remote_info = self.fetch_remote_info(access_token)
+            resp = session.post(
+                _PLATFORM_OAUTH_TOKEN_URL,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": _PLATFORM_OAUTH_CLIENT_ID,
+                },
+                timeout=20,
+            )
+        except Exception as exc:
+            print(f"[oauth-refresh] request failed: {exc}")
+            return None
+        finally:
+            session.close()
+        if resp.status_code != 200:
+            print(f"[oauth-refresh] http={resp.status_code} body={resp.text[:200]}")
+            return None
+        try:
+            payload = resp.json()
+        except Exception:
+            return None
+        new_access = self._clean_token(payload.get("access_token"))
+        if not new_access:
+            return None
+        return {
+            "access_token": new_access,
+            "refresh_token": self._clean_token(payload.get("refresh_token")) or refresh_token,
+        }
+
+    def _rotate_access_token(self, old_access_token: str, new_tokens: dict) -> str | None:
+        """把账号在内存与存储中的 access_token 换成续期后的新值，返回新 token。"""
+        old_token = self._clean_token(old_access_token)
+        new_token = self._clean_token(new_tokens.get("access_token"))
+        if not old_token or not new_token:
+            return None
+        with self._lock:
+            index = self._find_account_index(old_token)
+            if index < 0:
+                return None
+            current = dict(self._accounts[index])
+            current["access_token"] = new_token
+            if new_tokens.get("refresh_token"):
+                current["refresh_token"] = new_tokens["refresh_token"]
+            normalized = self._normalize_account(current)
+            if normalized is None:
+                return None
+            self._accounts[index] = normalized
+            self._save_accounts()
+        return new_token
+
+    def _fetch_with_oauth_refresh(self, access_token: str) -> tuple[str, dict | None, str | None]:
+        """探活 access_token；若 401 则用 refresh_token 续期一次并重试。返回 (最终 token, remote_info, error)。"""
+        try:
+            return access_token, self.fetch_remote_info(access_token), None
         except Exception as exc:
             message = str(exc)
-            print(f"[account-available] refresh token={token_ref} fail {message}")
-            if "/backend-api/me failed: HTTP 401" in message:
-                if self.remove_invalid_token(access_token, "refresh_account_state"):
-                    return None
-                return self.update_account(
-                    access_token,
-                    {
-                        "status": "异常",
-                        "quota": 0,
-                    },
-                )
-            return None
-        return self.update_account(access_token, remote_info)
+        if "/backend-api/me failed: HTTP 401" not in message:
+            return access_token, None, message
+        account = self.get_account(access_token) or {}
+        refresh_token = account.get("refresh_token")
+        if not refresh_token:
+            return access_token, None, message
+        new_tokens = self._try_refresh_oauth_token(refresh_token)
+        if not new_tokens:
+            return access_token, None, message
+        rotated = self._rotate_access_token(access_token, new_tokens)
+        if not rotated:
+            return access_token, None, message
+        token_ref = anonymize_token(rotated)
+        print(f"[oauth-refresh] rotated {anonymize_token(access_token)} -> {token_ref}, retry")
+        try:
+            return rotated, self.fetch_remote_info(rotated), None
+        except Exception as retry_exc:
+            return rotated, None, str(retry_exc)
 
     def get_available_access_token(self) -> str:
         attempted_tokens: set[str] = set()
@@ -305,8 +394,11 @@ class AccountService:
             attempted_tokens.add(access_token)
             token_ref = anonymize_token(access_token)
             account = self.refresh_account_state(access_token)
+            final_token = self._clean_token((account or {}).get("access_token")) or access_token
+            if final_token != access_token:
+                attempted_tokens.add(final_token)
             if self._is_image_account_available(account or {}):
-                return access_token
+                return final_token
             print(
                 f"[account-available] skip token={token_ref} "
                 f"quota={account.get('quota') if account else 'unknown'} "
@@ -394,16 +486,32 @@ class AccountService:
                    and (token := self._clean_token(item.get("access_token")))
             ]
 
-    def add_accounts(self, tokens: list[str]) -> dict:
-        cleaned_tokens = self._clean_tokens(tokens)
-        if not cleaned_tokens:
+    def add_accounts(self, tokens: list[str | dict]) -> dict:
+        cleaned: list[tuple[str, dict]] = []
+        seen: set[str] = set()
+        for entry in tokens or []:
+            if isinstance(entry, dict):
+                access_token = self._clean_token(entry.get("access_token"))
+                metadata = {
+                    key: entry[key]
+                    for key in ("refresh_token",)
+                    if entry.get(key)
+                }
+            else:
+                access_token = self._clean_token(entry)
+                metadata = {}
+            if not access_token or access_token in seen:
+                continue
+            seen.add(access_token)
+            cleaned.append((access_token, metadata))
+        if not cleaned:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
 
         with self._lock:
             indexed = {self._clean_token(item.get("access_token")): dict(item) for item in self._accounts}
             added = 0
             skipped = 0
-            for access_token in cleaned_tokens:
+            for access_token, metadata in cleaned:
                 current = indexed.get(access_token)
                 if current is None:
                     added += 1
@@ -413,6 +521,7 @@ class AccountService:
                 account = self._normalize_account(
                     {
                         **current,
+                        **metadata,
                         "access_token": access_token,
                         "type": str(current.get("type") or "Free"),
                     }
@@ -599,28 +708,32 @@ class AccountService:
         max_workers = min(10, len(cleaned_tokens))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(self.fetch_remote_info, access_token): access_token for access_token in
-                          cleaned_tokens}
+            future_map = {
+                executor.submit(self._fetch_with_oauth_refresh, access_token): access_token
+                for access_token in cleaned_tokens
+            }
             for future in as_completed(future_map):
-                access_token = future_map[future]
+                original_token = future_map[future]
                 try:
-                    remote_info = future.result()
-                    if self.update_account(access_token, remote_info) is not None:
-                        refreshed += 1
+                    final_token, remote_info, error = future.result()
                 except Exception as exc:
-                    message = str(exc)
-                    print(f"[account-refresh] fail {anonymize_token(access_token)} {message}")
-                    if "/backend-api/me failed: HTTP 401" in message:
-                        if not self.remove_invalid_token(access_token, "refresh_accounts"):
-                            self.update_account(
-                                access_token,
-                                {
-                                    "status": "异常",
-                                    "quota": 0,
-                                },
-                            )
-                        message = "检测到封号"
-                    errors.append(self._public_error(access_token, message))
+                    final_token, remote_info, error = original_token, None, str(exc)
+                if remote_info is not None:
+                    if self.update_account(final_token, remote_info) is not None:
+                        refreshed += 1
+                    continue
+                print(f"[account-refresh] fail {anonymize_token(final_token)} {error}")
+                if error and "/backend-api/me failed: HTTP 401" in error:
+                    if not self.remove_invalid_token(final_token, "refresh_accounts"):
+                        self.update_account(
+                            final_token,
+                            {
+                                "status": "异常",
+                                "quota": 0,
+                            },
+                        )
+                    error = "会话失效，refresh_token 续期失败"
+                errors.append(self._public_error(final_token, error or ""))
 
         print(f"[account-refresh] done refreshed={refreshed} errors={len(errors)} workers={max_workers}")
         return {

@@ -130,7 +130,8 @@ class ImageEditsApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json(), {"detail": {"error": "images is required"}})
+        body = response.json()
+        self.assertEqual(body.get("error", {}).get("message"), "images is required")
 
     def test_rejects_json_with_invalid_image_url(self) -> None:
         response = self.client.post(
@@ -150,9 +151,10 @@ class ImageEditsApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+        body = response.json()
         self.assertEqual(
-            response.json(),
-            {"detail": {"error": "images[0].image_url must be a data URL"}},
+            body.get("error", {}).get("message"),
+            "images[0].image_url must be a data URL",
         )
 
     def test_rejects_json_with_invalid_base64_image(self) -> None:
@@ -173,9 +175,10 @@ class ImageEditsApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+        body = response.json()
         self.assertEqual(
-            response.json(),
-            {"detail": {"error": "images[0].image_url base64 decode failed"}},
+            body.get("error", {}).get("message"),
+            "images[0].image_url base64 decode failed",
         )
 
 

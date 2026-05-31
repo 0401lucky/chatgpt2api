@@ -22,6 +22,14 @@ function formatSize(size: number) {
   return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.ceil(size / 1024)} KB`;
 }
 
+function formatApiMode(mode: string | undefined) {
+  return mode === "edit" ? "编辑" : "生成";
+}
+
+function formatTokenCount(value: number | undefined) {
+  return new Intl.NumberFormat("zh-CN").format(Math.max(0, value || 0));
+}
+
 function imageKey(item: ManagedImage) {
   return item.rel || item.url;
 }
@@ -75,6 +83,7 @@ function ImageManagerContent() {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [promptTarget, setPromptTarget] = useState<ManagedImage | null>(null);
 
   const filteredItems = selectedTags.length > 0
     ? items.filter((item) => selectedTags.every((t) => (item.tags ?? []).includes(t)))
@@ -364,6 +373,8 @@ function ImageManagerContent() {
           <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {currentRows.map((item) => {
               const imageIndex = filteredItems.findIndex((row) => row.url === item.url);
+              const apiHistory = item.api_history;
+              const prompt = apiHistory?.prompt?.trim() || "";
               return (
               <div key={item.rel} className="group border-r border-b border-stone-100 p-4 transition hover:bg-stone-50">
                 <div className="relative">
@@ -388,6 +399,11 @@ function ImageManagerContent() {
                     <span className="absolute right-2 bottom-2 rounded-full bg-black/50 p-2 text-white opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">
                       <Maximize2 className="size-4" />
                     </span>
+                    {apiHistory ? (
+                      <span className="absolute top-2 left-2 rounded-full bg-stone-950/75 px-2.5 py-1 text-[10px] font-medium text-white">
+                        API
+                      </span>
+                    ) : null}
                   </button>
                   <button
                     type="button"
@@ -435,6 +451,37 @@ function ImageManagerContent() {
                     <span>{formatSize(item.size)}</span>
                     <span>{item.width && item.height ? `${item.width} x ${item.height}` : "-"}</span>
                   </div>
+                  {apiHistory ? (
+                    <div className="space-y-2 rounded-lg bg-stone-50 p-2.5 text-[11px] leading-5 text-stone-500">
+                      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                        <Badge variant="secondary" className="rounded-md text-[10px]">
+                          API {formatApiMode(apiHistory.mode)}
+                        </Badge>
+                        <span className="max-w-full truncate font-medium text-stone-700">
+                          {apiHistory.model || "未知模型"}
+                        </span>
+                        <span className="truncate text-stone-400">{apiHistory.source_endpoint}</span>
+                      </div>
+                      {prompt ? (
+                        <button
+                          type="button"
+                          className="line-clamp-2 w-full text-left text-stone-600 transition hover:text-stone-950"
+                          onClick={() => setPromptTarget(item)}
+                        >
+                          {prompt}
+                        </button>
+                      ) : (
+                        <p className="text-stone-400">无提示词</p>
+                      )}
+                      {apiHistory.usage ? (
+                        <div className="flex flex-wrap gap-x-3 gap-y-1 text-stone-400">
+                          <span>输入 {formatTokenCount(apiHistory.usage.input_tokens)}</span>
+                          <span>输出 {formatTokenCount(apiHistory.usage.output_tokens)}</span>
+                          <span>总计 {formatTokenCount(apiHistory.usage.total_tokens)}</span>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-1">
                     {(item.tags ?? []).map((tag) => (
                       <Badge key={tag} variant="secondary" className="gap-0.5 rounded-md py-0 pr-0.5 text-[10px]">
@@ -564,6 +611,27 @@ function ImageManagerContent() {
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
       />
+      <Dialog open={Boolean(promptTarget)} onOpenChange={(open) => { if (!open) setPromptTarget(null); }}>
+        <DialogContent className="w-[min(92vw,720px)] rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>API 提示词</DialogTitle>
+          </DialogHeader>
+          {promptTarget?.api_history ? (
+            <div className="space-y-3">
+              <div className="flex flex-wrap gap-2 text-xs text-stone-500">
+                <Badge variant="secondary" className="rounded-md">
+                  API {formatApiMode(promptTarget.api_history.mode)}
+                </Badge>
+                <span className="rounded-md bg-stone-100 px-2 py-1">{promptTarget.api_history.model || "未知模型"}</span>
+                <span className="rounded-md bg-stone-100 px-2 py-1">{promptTarget.api_history.source_endpoint}</span>
+              </div>
+              <div className="max-h-[58vh] overflow-y-auto rounded-2xl bg-stone-50 px-4 py-3 text-sm leading-7 whitespace-pre-wrap break-words text-stone-700">
+                {promptTarget.api_history.prompt || "无提示词"}
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
       <Dialog open={Boolean(deleteMode)} onOpenChange={(open) => (!open ? setDeleteMode(null) : null)}>
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">
           <DialogHeader className="gap-2">
@@ -589,7 +657,7 @@ function ImageManagerContent() {
             <DialogTitle>删除标签</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-stone-600">
-            确定要删除标签 <span className="font-semibold">"{tagDeleteTarget}"</span> 吗？将从所有图片中移除该标签。
+            确定要删除标签 <span className="font-semibold">“{tagDeleteTarget}”</span> 吗？将从所有图片中移除该标签。
           </p>
           <DialogFooter>
             <Button variant="outline" className="rounded-xl" onClick={() => setTagDeleteTarget(null)}>

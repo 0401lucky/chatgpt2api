@@ -204,6 +204,17 @@ export type ManagedImage = {
   width?: number;
   height?: number;
   tags?: string[];
+  source?: "api_history" | string;
+  api_history?: {
+    record_id: string;
+    image_id: string;
+    created_at: string;
+    source_endpoint: string;
+    mode: "generate" | "edit" | string;
+    model: string;
+    prompt: string;
+    usage?: ApiImageUsage;
+  };
 };
 
 export type SystemLog = {

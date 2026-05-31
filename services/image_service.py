@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from PIL import Image, ImageOps
 
 from services.config import config
+from services.image_history_service import image_history_service
 from services.image_tags_service import load_tags, remove_tags
 
 THUMBNAIL_SIZE = (320, 320)
@@ -61,6 +62,23 @@ def _image_dimensions(path: Path) -> tuple[int, int] | None:
             return image.size
     except Exception:
         return None
+
+
+def _path_day(rel: str, path: Path) -> str:
+    parts = rel.split("/")
+    if len(parts) >= 3 and all(part.isdigit() for part in parts[:3]):
+        return "-".join(parts[:3])
+    if len(parts) >= 4 and parts[0] == "api-history" and all(part.isdigit() for part in parts[1:4]):
+        return "-".join(parts[1:4])
+    return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
+
+
+def _format_history_created_at(value: object) -> str:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00")).astimezone()
+    except Exception:
+        return ""
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def ensure_thumbnail(relative_path: str) -> Path:
@@ -116,8 +134,7 @@ def _image_items(start_date: str = "", end_date: str = "") -> list[dict[str, obj
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
-        parts = rel.split("/")
-        day = "-".join(parts[:3]) if len(parts) >= 4 else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
+        day = _path_day(rel, path)
         if start_date and day < start_date:
             continue
         if end_date and day > end_date:
@@ -138,17 +155,30 @@ def _image_items(start_date: str = "", end_date: str = "") -> list[dict[str, obj
 
 def list_images(base_url: str, start_date: str = "", end_date: str = "") -> dict[str, object]:
     config.cleanup_old_images()
+    image_history_service.ensure_managed_images()
     cleanup_image_thumbnails()
     all_tags = load_tags()
-    items = [
-        {
+    history_metadata = image_history_service.managed_metadata_by_path()
+    items = []
+    for item in _image_items(start_date, end_date):
+        path = str(item["path"])
+        history = history_metadata.get(path)
+        next_item = {
             **item,
-            "url": f"{base_url.rstrip('/')}/images/{item['path']}",
-            "thumbnail_url": thumbnail_url(base_url, str(item["path"])),
-            "tags": all_tags.get(str(item["path"]), []),
+            "url": f"{base_url.rstrip('/')}/images/{path}",
+            "thumbnail_url": thumbnail_url(base_url, path),
+            "tags": all_tags.get(path, []),
         }
-        for item in _image_items(start_date, end_date)
-    ]
+        if history:
+            created_at = _format_history_created_at(history.get("created_at"))
+            if created_at:
+                next_item["created_at"] = created_at
+                next_item["date"] = created_at[:10]
+            next_item["source"] = "api_history"
+            next_item["api_history"] = history
+        items.append(next_item)
+
+    items.sort(key=lambda item: str(item["created_at"]), reverse=True)
     groups: dict[str, list[dict[str, object]]] = {}
     for item in items:
         groups.setdefault(str(item["date"]), []).append(item)
@@ -159,6 +189,7 @@ def delete_images(paths: list[str] | None = None, start_date: str = "", end_date
     root = config.images_dir.resolve()
     targets = [str(item["path"]) for item in _image_items(start_date, end_date)] if all_matching else (paths or [])
     removed = 0
+    removed_paths: list[str] = []
     for item in targets:
         path = (root / item).resolve()
         try:
@@ -172,6 +203,9 @@ def delete_images(paths: list[str] | None = None, start_date: str = "", end_date
                     thumbnail.unlink()
             remove_tags(item)
             removed += 1
+            removed_paths.append(_safe_relative_path(item))
+    if removed_paths:
+        image_history_service.delete_by_relative_paths(removed_paths)
     _cleanup_empty_dirs(root)
     _cleanup_empty_dirs(config.image_thumbnails_dir)
     return {"removed": removed}

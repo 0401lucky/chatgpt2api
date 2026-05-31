@@ -1,3 +1,4 @@
+import base64
 import tempfile
 import unittest
 from pathlib import Path
@@ -348,6 +349,109 @@ class ImageHistoryServiceTests(unittest.TestCase):
         self.assertEqual(result["deleted_images"], 1)
         self.assertEqual(result["deleted_records"], 1)
         self.assertEqual(len(self.service.list_records()), 0)
+
+    def test_save_record_reuses_existing_managed_image_url(self) -> None:
+        base_dir = Path(self.temp_dir.name)
+        managed_dir = base_dir / "images"
+        rel_path = Path("2026") / "05" / "31" / "existing.png"
+        image_path = managed_dir / rel_path
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(base64.b64decode(PNG_B64))
+        service = ImageHistoryService(
+            store_file=base_dir / "managed_history.json",
+            image_dir=base_dir / "managed-history",
+            managed_image_dir=managed_dir,
+        )
+
+        record = service.save_record(
+            source_endpoint="/v1/images/generations",
+            mode="generate",
+            model="gpt-image-1",
+            prompt="已有管理图片",
+            image_items=[{"url": "http://testserver/images/2026/05/31/existing.png"}],
+            usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        )
+
+        image = record["images"][0]
+        self.assertEqual(image["file_name"], "existing.png")
+        self.assertEqual(image["rel_path"], "2026/05/31/existing.png")
+        stored_path = service.get_image_path(record["id"], image["id"])
+        self.assertIsNotNone(stored_path)
+        self.assertEqual(stored_path.resolve(strict=False), image_path.resolve(strict=False))
+        self.assertFalse((base_dir / "managed-history" / "existing.png").exists())
+        self.assertEqual(service.managed_metadata_by_path()["2026/05/31/existing.png"]["prompt"], "已有管理图片")
+
+    def test_ensure_managed_images_migrates_legacy_history_file(self) -> None:
+        base_dir = Path(self.temp_dir.name)
+        history_file = base_dir / "legacy_history.json"
+        history_dir = base_dir / "legacy-history"
+        legacy_service = ImageHistoryService(
+            store_file=history_file,
+            image_dir=history_dir,
+        )
+        record = legacy_service.save_record(
+            source_endpoint="/v1/images/generations",
+            mode="generate",
+            model="gpt-image-1",
+            prompt="旧历史图片",
+            image_items=[{"b64_json": PNG_B64}],
+            usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        )
+        old_path = legacy_service.get_image_path(record["id"], record["images"][0]["id"])
+        self.assertIsNotNone(old_path)
+
+        managed_dir = base_dir / "images"
+        managed_service = ImageHistoryService(
+            store_file=history_file,
+            image_dir=history_dir,
+            managed_image_dir=managed_dir,
+        )
+        self.assertEqual(managed_service.ensure_managed_images(), 1)
+
+        migrated = managed_service.list_records()[0]["images"][0]
+        rel_path = migrated["rel_path"]
+        self.assertTrue((managed_dir / rel_path).is_file())
+        self.assertTrue(old_path.is_file())
+        self.assertEqual(managed_service.managed_metadata_by_path()[rel_path]["record_id"], record["id"])
+
+    def test_delete_by_relative_paths_removes_managed_and_legacy_history_files(self) -> None:
+        base_dir = Path(self.temp_dir.name)
+        history_file = base_dir / "delete_managed_history.json"
+        history_dir = base_dir / "delete-managed-history"
+        legacy_service = ImageHistoryService(
+            store_file=history_file,
+            image_dir=history_dir,
+        )
+        record = legacy_service.save_record(
+            source_endpoint="/v1/images/generations",
+            mode="generate",
+            model="gpt-image-1",
+            prompt="删除管理图片",
+            image_items=[{"b64_json": PNG_B64}],
+            usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        )
+        old_path = legacy_service.get_image_path(record["id"], record["images"][0]["id"])
+        self.assertIsNotNone(old_path)
+
+        managed_dir = base_dir / "images"
+        managed_service = ImageHistoryService(
+            store_file=history_file,
+            image_dir=history_dir,
+            managed_image_dir=managed_dir,
+        )
+        managed_service.ensure_managed_images()
+        rel_path = managed_service.list_records()[0]["images"][0]["rel_path"]
+        managed_path = managed_dir / rel_path
+        self.assertTrue(managed_path.is_file())
+        self.assertTrue(old_path.is_file())
+
+        result = managed_service.delete_by_relative_paths([rel_path])
+
+        self.assertEqual(result["deleted_images"], 1)
+        self.assertEqual(result["deleted_records"], 1)
+        self.assertEqual(managed_service.list_records(), [])
+        self.assertFalse(managed_path.exists())
+        self.assertFalse(old_path.exists())
 
 
 if __name__ == "__main__":

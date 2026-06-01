@@ -113,9 +113,6 @@ func (c *Client) FetchRemoteInfo(ctx context.Context) (map[string]any, error) {
 	if c.AccessToken == "" {
 		return nil, fmt.Errorf("access_token is required")
 	}
-	if err := c.bootstrap(ctx); err != nil {
-		return nil, err
-	}
 	mePayload, err := c.getJSON(ctx, "/backend-api/me", "/backend-api/me")
 	if err != nil {
 		return nil, err

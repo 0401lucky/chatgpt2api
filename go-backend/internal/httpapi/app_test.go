@@ -17,7 +17,9 @@ import (
 	"chatgpt2api-go-backend/internal/auth"
 	"chatgpt2api-go-backend/internal/config"
 	"chatgpt2api-go-backend/internal/protocol"
+	"chatgpt2api-go-backend/internal/proxy"
 	"chatgpt2api-go-backend/internal/storage"
+	"chatgpt2api-go-backend/internal/upstream"
 )
 
 func TestAccountsRequireAdminAndHideToken(t *testing.T) {
@@ -120,6 +122,42 @@ func TestAccountRefreshWritesSystemLog(t *testing.T) {
 	items := body["items"].([]any)
 	if len(items) == 0 || items[0].(map[string]any)["summary"] != "刷新账号" {
 		t.Fatalf("logs = %#v", body)
+	}
+}
+
+func TestFetchRemoteInfoDoesNotBootstrapHomepage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			t.Fatalf("should not request homepage during account refresh")
+		case "/backend-api/me":
+			_ = json.NewEncoder(w).Encode(map[string]any{"email": "test@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"default_model_slug": "gpt-5",
+				"limits_progress": []map[string]any{{
+					"feature_name": "image_gen",
+					"remaining":    2,
+					"reset_after":  "2026-06-01T00:00:00Z",
+				}},
+				"workspace": map[string]any{"plan_type": "plus"},
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	service := upstream.NewService(nil, proxy.NewService(""))
+	service.BaseURL = server.URL
+	client := service.NewClient("test-token")
+	client.HTTPClient = server.Client()
+	info, err := client.FetchRemoteInfo(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info["quota"] != 2 || info["status"] != "正常" {
+		t.Fatalf("info = %#v", info)
 	}
 }
 

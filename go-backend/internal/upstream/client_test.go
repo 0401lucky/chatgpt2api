@@ -50,8 +50,7 @@ func TestFetchRemoteInfo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("<html></html>"))
+			t.Fatalf("refresh account should not bootstrap homepage")
 		case "/backend-api/me":
 			if r.Header.Get("Authorization") != "Bearer test-token" {
 				t.Fatalf("authorization = %q", r.Header.Get("Authorization"))

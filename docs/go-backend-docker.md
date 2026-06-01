@@ -2,9 +2,13 @@
 
 本文用于 Go 后端单容器本地验证。
 
-根目录 `Dockerfile` 已经切换为 Go 后端镜像。
-Zeabur 这类默认读取根目录 `Dockerfile` 的平台，重新部署后会直接使用
-Go 后端，不需要单独切换到 `go-backend` 目录。
+注意：根目录 `Dockerfile` 仍保留为原 Python 完整后端。
+这是为了避免注册机、图片管理、日志管理、设置、备份、图床、
+CPA、Sub2API、图生图等未迁移功能在线上缺失。
+
+Go 后端目前作为旁路验证版本，通过 `docker-compose.go.yml`
+或 `go-backend/Dockerfile` 单独启动。等周边功能补齐并压测通过后，
+再考虑把根目录 `Dockerfile` 切换到 Go。
 
 当前形态不是两个容器：
 

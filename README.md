@@ -1,7 +1,7 @@
 <h1 align="center">ChatGPT2API</h1>
 
 
-<p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容图片 API / 代理，并集成在线画图、号池管理、多种账号导入方式与 Docker 自托管部署能力。</p>
+<p align="center">ChatGPT2API 主要是对 ChatGPT 官网相关能力进行逆向整理与封装，提供面向 ChatGPT 图片生成、图片编辑、多图组图编辑场景的 OpenAI 兼容图片 API / 代理，并集成在线画图、号池管理、多种账号导入方式与 Docker 自托管部署能力。当前默认容器形态已切到 Go 后端，原 Web 页面仍保留，不做前端重写。</p>
 
 > [!WARNING]
 > 免责声明：
@@ -22,17 +22,19 @@
 
 ## 快速开始
 
-已发布镜像支持 `linux/amd64` 与 `linux/arm64`，在 x86 服务器和 Apple Silicon / ARM Linux 设备上都会自动拉取匹配架构的版本。
+当前默认 Docker 部署会在本地构建原 Next.js 静态页和 Go 后端，并打包成一个容器。
 
 ### Docker 运行
 
 ```bash
 git clone git@github.com:basketikun/chatgpt2api.git
 cd chatgpt2api
+export CHATGPT2API_AUTH_KEY="你的管理密钥"
 docker compose up -d
 ```
 
-启动前请先在 `config.json` 中设置 `auth-key`，也可以在 `docker-compose.yml` 中通过 `CHATGPT2API_AUTH_KEY` 覆盖。
+启动前请先设置 `CHATGPT2API_AUTH_KEY`，或者把 `config.json` 中的 `auth-key` 改成真实值。
+当前根目录 `Dockerfile` 会把原 Web 页面和 Go API 一起打进同一个容器，页面和接口共用一个入口。
 
 - Web 面板：`http://localhost:3000`
 - API 地址：`http://localhost:3000/v1`
@@ -40,39 +42,27 @@ docker compose up -d
 
 ### 本地开发
 
-启动后端：
+启动 Go 后端：
 
 ```bash
 git clone git@github.com:basketikun/chatgpt2api.git
 cd chatgpt2api
-uv sync
-uv run main.py
+cd go-backend
+CHATGPT2API_AUTH_KEY=go-backend-local-key go run ./cmd/chatgpt2api
 ```
 
 启动前端：
 
 ```bash
 cd chatgpt2api/web
-bun install
-bun run dev
+npm ci
+npm run dev
 ```
 
-### 存储后端配置
+### 存储说明
 
-支持通过环境变量 `STORAGE_BACKEND` 切换存储方式：
-
-- `json` - 本地 JSON 文件（默认）
-- `sqlite` - 本地 SQLite 数据库
-- `postgres` - 外部 PostgreSQL（需配置 `DATABASE_URL`）
-- `git` - Git 私有仓库（需配置 `GIT_REPO_URL` 和 `GIT_TOKEN`）
-
-示例：使用 PostgreSQL
-
-```yaml
-environment:
-  - STORAGE_BACKEND=postgres
-  - DATABASE_URL=postgresql://user:password@host:5432/dbname
-```
+Go 后端当前使用本地 JSON 存储，默认数据目录是 `./data`，可通过 `CHATGPT2API_DATA_DIR` 覆盖。
+旧版 `sqlite` / `postgres` / `git` 存储说明只适用于历史 Python 实现，不再作为当前 Go 版默认文档。
 
 ## 功能
 
@@ -110,7 +100,7 @@ environment:
 
 ### 实验性 / 规划中
 
-- `/v1/complete` 文本补全与流式输出已实现，但仍在测试，目前会出现对话重复的问题，请谨慎测试使用
+- Go 默认后端当前未提供 `/v1/complete`；文本能力以 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 为主
 - 详细状态说明见：[功能清单](./docs/feature-status.en.md)
 
 ## Screenshots
@@ -150,7 +140,7 @@ Authorization: Bearer <auth-key>
 返回当前暴露的图片模型列表。
 
 ```bash
-curl http://localhost:8000/v1/models \
+curl http://localhost:3000/v1/models \
   -H "Authorization: Bearer <auth-key>"
 ```
 
@@ -174,7 +164,7 @@ curl http://localhost:8000/v1/models \
 OpenAI 兼容图片生成接口，用于文生图。
 
 ```bash
-curl http://localhost:8000/v1/images/generations \
+curl http://localhost:3000/v1/images/generations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{
@@ -207,7 +197,7 @@ curl http://localhost:8000/v1/images/generations \
 OpenAI 兼容图片编辑接口，用于上传图片并生成编辑结果。
 
 ```bash
-curl http://localhost:8000/v1/images/edits \
+curl http://localhost:3000/v1/images/edits \
   -H "Authorization: Bearer <auth-key>" \
   -F "model=gpt-image-2" \
   -F "prompt=把这张图改成赛博朋克夜景风格" \
@@ -237,7 +227,7 @@ curl http://localhost:8000/v1/images/edits \
 面向图片场景的 Chat Completions 兼容接口，不是完整通用聊天代理。
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{
@@ -274,7 +264,7 @@ curl http://localhost:8000/v1/chat/completions \
 面向图片生成工具调用的 Responses API 兼容接口，不是完整通用 Responses API 代理。
 
 ```bash
-curl http://localhost:8000/v1/responses \
+curl http://localhost:3000/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <auth-key>" \
   -d '{

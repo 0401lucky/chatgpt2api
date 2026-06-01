@@ -123,6 +123,80 @@ func TestAccountRefreshWritesSystemLog(t *testing.T) {
 	}
 }
 
+func TestImagesListServesStaticFilesAndUsesShanghaiTime(t *testing.T) {
+	app, _ := newTestApp(t)
+	rel := filepath.ToSlash(filepath.Join("2026", "05", "31", "sample.png"))
+	imagePath := filepath.Join(app.local.DataDir, "images", filepath.FromSlash(rel))
+	thumbnailPath := filepath.Join(app.local.DataDir, "image_thumbnails", filepath.FromSlash(rel)+".png")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(thumbnailPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	imageBytes := []byte("image-bytes")
+	thumbBytes := []byte("thumb-bytes")
+	if err := os.WriteFile(imagePath, imageBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(thumbnailPath, thumbBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	modTime := time.Date(2026, 5, 31, 16, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(imagePath, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+
+	listResp := httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/api/images", nil)
+	listReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("images status = %d body=%s", listResp.Code, listResp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(listResp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	items := body["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("items = %#v", body["items"])
+	}
+	item := items[0].(map[string]any)
+	if got := item["created_at"]; got != "2026-06-01 00:00:00" {
+		t.Fatalf("created_at = %#v", got)
+	}
+	if got := item["date"]; got != "2026-06-01" {
+		t.Fatalf("date = %#v", got)
+	}
+	if got := item["url"].(string); !strings.Contains(got, "/images/"+rel) {
+		t.Fatalf("url = %s", got)
+	}
+	if got := item["thumbnail_url"].(string); !strings.Contains(got, "/image-thumbnails/"+rel) {
+		t.Fatalf("thumbnail_url = %s", got)
+	}
+
+	imageResp := httptest.NewRecorder()
+	imageReq := httptest.NewRequest(http.MethodGet, "/images/"+rel, nil)
+	app.ServeHTTP(imageResp, imageReq)
+	if imageResp.Code != http.StatusOK {
+		t.Fatalf("image route status = %d body=%s", imageResp.Code, imageResp.Body.String())
+	}
+	if imageResp.Body.String() != string(imageBytes) {
+		t.Fatalf("image route body = %q", imageResp.Body.String())
+	}
+
+	thumbResp := httptest.NewRecorder()
+	thumbReq := httptest.NewRequest(http.MethodGet, "/image-thumbnails/"+rel, nil)
+	app.ServeHTTP(thumbResp, thumbReq)
+	if thumbResp.Code != http.StatusOK {
+		t.Fatalf("thumbnail route status = %d body=%s", thumbResp.Code, thumbResp.Body.String())
+	}
+	if thumbResp.Body.String() != string(thumbBytes) {
+		t.Fatalf("thumbnail route body = %q", thumbResp.Body.String())
+	}
+}
+
 func TestRegisterProviderEnableStatePersists(t *testing.T) {
 	app, _ := newTestApp(t)
 	body := []byte(`{

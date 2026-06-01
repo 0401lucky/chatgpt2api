@@ -213,7 +213,7 @@ func (s *ImageService) List(baseURL, startDate, endDate string) map[string]any {
 		if endDate != "" && day > endDate {
 			return nil
 		}
-		createdAt := info.ModTime().Format("2006-01-02 15:04:05")
+		createdAt := localDisplayTime(info.ModTime())
 		item := map[string]any{
 			"rel":           rel,
 			"path":          rel,
@@ -555,7 +555,7 @@ func (s *ImageService) SaveImageBytes(raw []byte, filename, baseURL string) (str
 	if len(raw) == 0 {
 		return "", errors.New("image is empty")
 	}
-	day := time.Now()
+	day := localTime(time.Now())
 	rel := filepath.ToSlash(filepath.Join(day.Format("2006"), day.Format("01"), day.Format("02"), filename))
 	path, ok := safeJoin(s.ImagesDir, rel)
 	if !ok {
@@ -1270,14 +1270,7 @@ func safeRelFromPath(root, path string) (string, bool) {
 }
 
 func imageDay(rel string, modTime time.Time) string {
-	parts := strings.Split(rel, "/")
-	if len(parts) >= 3 && len(parts[0]) == 4 && len(parts[1]) == 2 && len(parts[2]) == 2 {
-		return parts[0] + "-" + parts[1] + "-" + parts[2]
-	}
-	if len(parts) >= 4 && parts[0] == "api-history" {
-		return parts[1] + "-" + parts[2] + "-" + parts[3]
-	}
-	return modTime.Format("2006-01-02")
+	return localDisplayTime(modTime)[:10]
 }
 
 func formatHistoryTime(value string) string {
@@ -1286,10 +1279,22 @@ func formatHistoryTime(value string) string {
 	}
 	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
 		if parsed, err := time.Parse(layout, value); err == nil {
-			return parsed.Local().Format("2006-01-02 15:04:05")
+			return localDisplayTime(parsed)
 		}
 	}
 	return ""
+}
+
+func localDisplayTime(value time.Time) string {
+	return localTime(value).Format("2006-01-02 15:04:05")
+}
+
+func localTime(value time.Time) time.Time {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		loc = time.FixedZone("Asia/Shanghai", 8*3600)
+	}
+	return value.In(loc)
 }
 
 func pathURL(rel string) string {

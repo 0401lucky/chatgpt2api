@@ -43,6 +43,8 @@ $env:CHATGPT2API_AUTH_KEY="go-backend-local-key"
 - 页面和 API 都通过 `http://127.0.0.1:3000`
 - 容器内 `nginx` 监听 `80`
 - Go API 监听容器内 `8001`
+- 图片管理中的 `/images/` 和 `/image-thumbnails/` 也由 `nginx` 转发到 Go 后端，
+  不需要额外暴露第二个服务端口。
 
 
 ## 基础验证

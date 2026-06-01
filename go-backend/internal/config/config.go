@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type Config struct {
+	mu                           sync.Mutex
 	ProjectRoot                  string
 	ConfigFile                   string
 	DataDir                      string
@@ -25,6 +27,18 @@ type Config struct {
 	Proxy                        string
 	Version                      string
 	Raw                          map[string]any
+}
+
+var defaultBackupInclude = map[string]bool{
+	"config":             true,
+	"register":           true,
+	"cpa":                true,
+	"sub2api":            true,
+	"logs":               true,
+	"image_tasks":        true,
+	"accounts_snapshot":  true,
+	"auth_keys_snapshot": true,
+	"images":             false,
 }
 
 func Load() (*Config, error) {
@@ -71,6 +85,142 @@ func LoadFrom(projectRoot, configFile string) (*Config, error) {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 	return cfg, nil
+}
+
+func (c *Config) PublicConfig() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.publicConfigLocked()
+}
+
+func (c *Config) Update(updates map[string]any) (map[string]any, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	next := copyMap(c.Raw)
+	for key, value := range updates {
+		if key == "auth-key" || key == "backup_state" {
+			continue
+		}
+		next[key] = value
+	}
+	if rawBackup, ok := next["backup"]; ok {
+		current := normalizeBackupSettings(c.Raw["backup"])
+		next["backup"] = normalizeBackupSettingsWithPrevious(rawBackup, current)
+	}
+	if rawImgbed, ok := next["imgbed"]; ok {
+		current := normalizeImgbedSettings(c.Raw["imgbed"])
+		next["imgbed"] = normalizeImgbedSettingsWithPrevious(rawImgbed, current)
+	}
+	if err := writeJSONObject(c.ConfigFile, next); err != nil {
+		return nil, err
+	}
+	c.Raw = next
+	c.refreshDerivedLocked()
+	return c.publicConfigLocked(), nil
+}
+
+func (c *Config) BackupSettings(maskSecrets bool) map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	settings := normalizeBackupSettings(c.Raw["backup"])
+	if maskSecrets {
+		if cleanString(settings["secret_access_key"]) != "" {
+			settings["secret_access_key"] = "********"
+		}
+		if cleanString(settings["passphrase"]) != "" {
+			settings["passphrase"] = "********"
+		}
+	}
+	return settings
+}
+
+func (c *Config) ImgbedSettings(maskSecrets bool) map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	settings := normalizeImgbedSettings(c.Raw["imgbed"])
+	if maskSecrets && cleanString(settings["api_token"]) != "" {
+		settings["api_token"] = "********"
+	}
+	return settings
+}
+
+func (c *Config) StorageInfo() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return map[string]any{
+		"backend": map[string]any{
+			"type":     "json",
+			"data_dir": c.DataDir,
+		},
+		"health": map[string]any{
+			"ok": true,
+		},
+	}
+}
+
+func (c *Config) BackupState() map[string]any {
+	return normalizeBackupState(readJSONObject(filepath.Join(c.DataDir, "backup_state.json")))
+}
+
+func (c *Config) SaveBackupState(state map[string]any) map[string]any {
+	normalized := normalizeBackupState(state)
+	_ = writeJSONObject(filepath.Join(c.DataDir, "backup_state.json"), normalized)
+	return normalized
+}
+
+func (c *Config) ImagesDir() string {
+	return ensureDir(filepath.Join(c.DataDir, "images"))
+}
+
+func (c *Config) ImageThumbnailsDir() string {
+	return ensureDir(filepath.Join(c.DataDir, "image_thumbnails"))
+}
+
+func (c *Config) ImageHistoryDir() string {
+	return ensureDir(filepath.Join(c.DataDir, "image_history"))
+}
+
+func (c *Config) ImageHistoryFile() string {
+	return filepath.Join(c.DataDir, "image_history.json")
+}
+
+func (c *Config) publicConfigLocked() map[string]any {
+	data := copyMap(c.Raw)
+	data["refresh_account_interval_minute"] = c.RefreshAccountIntervalMinute
+	data["image_retention_days"] = c.ImageRetentionDays
+	data["image_poll_timeout_secs"] = c.ImagePollTimeoutSecs
+	data["image_poll_initial_wait_secs"] = c.ImagePollInitialWaitSecs
+	data["image_poll_interval_secs"] = c.ImagePollIntervalSecs
+	data["image_account_concurrency"] = c.ImageAccountConcurrency
+	data["proxy"] = c.Proxy
+	data["base_url"] = c.BaseURL
+	data["auto_remove_invalid_accounts"] = boolValue(data["auto_remove_invalid_accounts"], false)
+	data["auto_remove_rate_limited_accounts"] = boolValue(data["auto_remove_rate_limited_accounts"], false)
+	if _, ok := data["global_system_prompt"]; !ok {
+		data["global_system_prompt"] = ""
+	}
+	if _, ok := data["sensitive_words"].([]any); !ok {
+		data["sensitive_words"] = []any{}
+	}
+	if _, ok := data["ai_review"].(map[string]any); !ok {
+		data["ai_review"] = map[string]any{}
+	}
+	data["backup"] = normalizeBackupSettingsWithMask(data["backup"])
+	data["backup_state"] = normalizeBackupState(readJSONObject(filepath.Join(c.DataDir, "backup_state.json")))
+	data["imgbed"] = normalizeImgbedSettingsWithMask(data["imgbed"])
+	delete(data, "auth-key")
+	return data
+}
+
+func (c *Config) refreshDerivedLocked() {
+	c.RefreshAccountIntervalMinute = intValue(c.Raw["refresh_account_interval_minute"], 60, 1)
+	c.ImageAccountConcurrency = intValue(c.Raw["image_account_concurrency"], 3, 1)
+	c.ImageRetentionDays = intValue(c.Raw["image_retention_days"], 30, 1)
+	c.ImagePollTimeoutSecs = intValue(c.Raw["image_poll_timeout_secs"], 120, 1)
+	c.ImagePollInitialWaitSecs = intValue(c.Raw["image_poll_initial_wait_secs"], 10, 0)
+	c.ImagePollIntervalSecs = intValue(c.Raw["image_poll_interval_secs"], 10, 1)
+	c.BaseURL = strings.TrimRight(strings.TrimSpace(envOr("CHATGPT2API_BASE_URL", cleanString(c.Raw["base_url"]))), "/")
+	c.Proxy = strings.TrimSpace(envOr("CHATGPT2API_PROXY", cleanString(c.Raw["proxy"])))
 }
 
 func resolveProjectRootAndConfig() (string, string, error) {
@@ -147,6 +297,39 @@ func readJSONObject(path string) map[string]any {
 	return out
 }
 
+func writeJSONObject(path string, value map[string]any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.json")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err == nil {
+		return nil
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func ensureDir(path string) string {
+	_ = os.MkdirAll(path, 0o755)
+	return path
+}
+
 func readVersion(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -198,4 +381,143 @@ func intValue(value any, fallback, minimum int) int {
 		return minimum
 	}
 	return n
+}
+
+func boolValue(value any, fallback bool) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	}
+	return fallback
+}
+
+func copyMap(value map[string]any) map[string]any {
+	out := make(map[string]any, len(value))
+	for key, item := range value {
+		out[key] = item
+	}
+	return out
+}
+
+func asMap(value any) map[string]any {
+	if item, ok := value.(map[string]any); ok {
+		return item
+	}
+	return map[string]any{}
+}
+
+func normalizeBackupInclude(value any) map[string]any {
+	source := asMap(value)
+	out := map[string]any{}
+	for key, fallback := range defaultBackupInclude {
+		out[key] = boolValue(source[key], fallback)
+	}
+	return out
+}
+
+func normalizeBackupSettings(value any) map[string]any {
+	source := asMap(value)
+	return map[string]any{
+		"enabled":           boolValue(source["enabled"], false),
+		"provider":          "cloudflare_r2",
+		"account_id":        cleanString(source["account_id"]),
+		"access_key_id":     cleanString(source["access_key_id"]),
+		"secret_access_key": cleanString(source["secret_access_key"]),
+		"bucket":            cleanString(source["bucket"]),
+		"prefix":            firstNonEmpty(strings.Trim(cleanString(source["prefix"]), "/"), "backups"),
+		"interval_minutes":  intValue(source["interval_minutes"], 360, 1),
+		"rotation_keep":     intValue(source["rotation_keep"], 10, 0),
+		"encrypt":           boolValue(source["encrypt"], false),
+		"passphrase":        cleanString(source["passphrase"]),
+		"include":           normalizeBackupInclude(source["include"]),
+	}
+}
+
+func normalizeBackupSettingsWithPrevious(value any, previous map[string]any) map[string]any {
+	out := normalizeBackupSettings(value)
+	if cleanString(out["secret_access_key"]) == "********" {
+		out["secret_access_key"] = cleanString(previous["secret_access_key"])
+	}
+	if cleanString(out["passphrase"]) == "********" {
+		out["passphrase"] = cleanString(previous["passphrase"])
+	}
+	return out
+}
+
+func normalizeBackupSettingsWithMask(value any) map[string]any {
+	out := normalizeBackupSettings(value)
+	if cleanString(out["secret_access_key"]) != "" {
+		out["secret_access_key"] = "********"
+	}
+	if cleanString(out["passphrase"]) != "" {
+		out["passphrase"] = "********"
+	}
+	return out
+}
+
+func normalizeImgbedSettings(value any) map[string]any {
+	source := asMap(value)
+	return map[string]any{
+		"enabled":           boolValue(source["enabled"], false),
+		"base_url":          strings.TrimRight(cleanString(source["base_url"]), "/"),
+		"api_token":         cleanString(source["api_token"]),
+		"folder_prefix":     firstNonEmpty(strings.Trim(cleanString(source["folder_prefix"]), "/"), "chatgpt2api"),
+		"timeout_seconds":   intValue(source["timeout_seconds"], 30, 1),
+		"fallback_to_local": boolValue(source["fallback_to_local"], true),
+	}
+}
+
+func normalizeImgbedSettingsWithPrevious(value any, previous map[string]any) map[string]any {
+	out := normalizeImgbedSettings(value)
+	if cleanString(out["api_token"]) == "" || cleanString(out["api_token"]) == "********" {
+		out["api_token"] = cleanString(previous["api_token"])
+	}
+	return out
+}
+
+func normalizeImgbedSettingsWithMask(value any) map[string]any {
+	out := normalizeImgbedSettings(value)
+	if cleanString(out["api_token"]) != "" {
+		out["api_token"] = "********"
+	}
+	return out
+}
+
+func normalizeBackupState(value any) map[string]any {
+	source := asMap(value)
+	return map[string]any{
+		"running":          false,
+		"last_started_at":  optionalString(source["last_started_at"]),
+		"last_finished_at": optionalString(source["last_finished_at"]),
+		"last_status":      firstNonEmpty(cleanString(source["last_status"]), "idle"),
+		"last_error":       optionalString(source["last_error"]),
+		"last_object_key":  optionalString(source["last_object_key"]),
+	}
+}
+
+func optionalString(value any) any {
+	if text := cleanString(value); text != "" {
+		return text
+	}
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }

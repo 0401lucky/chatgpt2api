@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"chatgpt2api-go-backend/internal/auth"
+	"chatgpt2api-go-backend/internal/protocol"
 )
 
 const (
@@ -29,6 +30,11 @@ type AccountPool interface {
 
 type Generator interface {
 	GenerateImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string) ([]map[string]any, error)
+	EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error)
+}
+
+type HistoryRecorder interface {
+	SaveHistoryRecord(sourceEndpoint, mode, model, prompt string, data []map[string]any, usage map[string]any)
 }
 
 type Service struct {
@@ -36,6 +42,7 @@ type Service struct {
 	path          string
 	accounts      AccountPool
 	generator     Generator
+	recorder      HistoryRecorder
 	retentionDays int
 	taskTimeout   time.Duration
 	tasks         map[string]*Task
@@ -61,6 +68,14 @@ type SubmitGenerationRequest struct {
 	Prompt       string
 	Model        string
 	Size         string
+}
+
+type SubmitEditRequest struct {
+	ClientTaskID string
+	Prompt       string
+	Model        string
+	Size         string
+	Images       []protocol.ImageInput
 }
 
 func NewService(path string, accounts AccountPool, generator Generator, retentionDays int, taskTimeout time.Duration) (*Service, error) {
@@ -93,6 +108,12 @@ func NewService(path string, accounts AccountPool, generator Generator, retentio
 		return nil, err
 	}
 	return service, nil
+}
+
+func (s *Service) SetHistoryRecorder(recorder HistoryRecorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recorder = recorder
 }
 
 func (s *Service) SubmitGeneration(identity *auth.Identity, req SubmitGenerationRequest) (map[string]any, error) {
@@ -142,6 +163,60 @@ func (s *Service) SubmitGeneration(identity *auth.Identity, req SubmitGeneration
 	s.mu.Unlock()
 
 	go s.runGeneration(key, prompt, model, task.Size)
+	return public, nil
+}
+
+func (s *Service) SubmitEdit(identity *auth.Identity, req SubmitEditRequest) (map[string]any, error) {
+	taskID := clean(req.ClientTaskID)
+	if taskID == "" {
+		return nil, errors.New("client_task_id is required")
+	}
+	prompt := clean(req.Prompt)
+	if prompt == "" {
+		return nil, errors.New("prompt is required")
+	}
+	if len(req.Images) == 0 {
+		return nil, errors.New("image file is required")
+	}
+	model := clean(req.Model)
+	if model == "" || model == "auto" {
+		model = "gpt-image-2"
+	}
+	owner := ownerID(identity)
+	key := taskKey(owner, taskID)
+	now := nowString()
+
+	s.mu.Lock()
+	if s.cleanupLocked() {
+		_ = s.saveLocked()
+	}
+	if task := s.tasks[key]; task != nil {
+		public := publicTask(task)
+		s.mu.Unlock()
+		return public, nil
+	}
+	task := &Task{
+		ID:        taskID,
+		OwnerID:   owner,
+		Status:    StatusQueued,
+		Mode:      "edit",
+		Model:     model,
+		Size:      clean(req.Size),
+		Prompt:    prompt,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.tasks[key] = task
+	if err := s.saveLocked(); err != nil {
+		delete(s.tasks, key)
+		s.mu.Unlock()
+		return nil, err
+	}
+	public := publicTask(task)
+	s.mu.Unlock()
+
+	images := append([]protocol.ImageInput(nil), req.Images...)
+	go s.runEdit(key, prompt, model, task.Size, images)
 	return public, nil
 }
 
@@ -226,6 +301,60 @@ func (s *Service) runGeneration(key, prompt, model, size string) {
 		return
 	}
 	s.accounts.MarkImageResult(token, true)
+	if s.recorder != nil {
+		s.recorder.SaveHistoryRecord("/api/image-tasks/generations", "generate", model, prompt, data, nil)
+	}
+	s.updateTask(key, map[string]any{"status": StatusSuccess, "data": data, "error": ""})
+}
+
+func (s *Service) runEdit(key, prompt, model, size string, images []protocol.ImageInput) {
+	s.updateTask(key, map[string]any{"status": StatusRunning, "error": ""})
+
+	if s.accounts == nil || s.generator == nil {
+		s.updateTask(key, map[string]any{
+			"status": StatusError,
+			"error":  "Go 后端图片编辑上游尚未配置",
+			"data":   []map[string]any{},
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.taskTimeout)
+	defer cancel()
+	token, release, err := s.accounts.AcquireImageToken(ctx, nil)
+	if err != nil {
+		s.updateTask(key, map[string]any{
+			"status": StatusError,
+			"error":  err.Error(),
+			"data":   []map[string]any{},
+		})
+		return
+	}
+	defer release()
+
+	data, err := s.generator.EditImage(ctx, token, prompt, model, size, "b64_json", images)
+	if err != nil {
+		s.accounts.MarkImageResult(token, false)
+		s.updateTask(key, map[string]any{
+			"status": StatusError,
+			"error":  err.Error(),
+			"data":   []map[string]any{},
+		})
+		return
+	}
+	if len(data) == 0 {
+		s.accounts.MarkImageResult(token, false)
+		s.updateTask(key, map[string]any{
+			"status": StatusError,
+			"error":  "上游没有返回图片，请检查账号额度或稍后重试",
+			"data":   []map[string]any{},
+		})
+		return
+	}
+	s.accounts.MarkImageResult(token, true)
+	if s.recorder != nil {
+		s.recorder.SaveHistoryRecord("/api/image-tasks/edits", "edit", model, prompt, data, nil)
+	}
 	s.updateTask(key, map[string]any{"status": StatusSuccess, "data": data, "error": ""})
 }
 

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +16,7 @@ import (
 	"chatgpt2api-go-backend/internal/account"
 	"chatgpt2api-go-backend/internal/auth"
 	"chatgpt2api-go-backend/internal/config"
+	"chatgpt2api-go-backend/internal/protocol"
 	"chatgpt2api-go-backend/internal/storage"
 )
 
@@ -93,6 +96,33 @@ func TestCreateAccountReportsRefreshNotImplemented(t *testing.T) {
 	}
 }
 
+func TestAccountRefreshWritesSystemLog(t *testing.T) {
+	app, _ := newTestApp(t)
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/refresh", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	logs := httptest.NewRecorder()
+	logsReq := httptest.NewRequest(http.MethodGet, "/api/logs?type=account", nil)
+	logsReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(logs, logsReq)
+	if logs.Code != http.StatusOK {
+		t.Fatalf("logs status = %d body=%s", logs.Code, logs.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(logs.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	items := body["items"].([]any)
+	if len(items) == 0 || items[0].(map[string]any)["summary"] != "刷新账号" {
+		t.Fatalf("logs = %#v", body)
+	}
+}
+
 func TestModelsRequireAuthAndUseLister(t *testing.T) {
 	app, _ := newTestAppWithModels(t, fakeModelLister{})
 	unauthorized := httptest.NewRecorder()
@@ -123,7 +153,12 @@ func newTestApp(t *testing.T) (*App, *account.Service) {
 
 func newTestAppWithModels(t *testing.T, models ModelLister) (*App, *account.Service) {
 	t.Helper()
-	store := storage.NewJSONStore(t.TempDir())
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	if err := os.WriteFile(filepath.Join(root, "config.json"), []byte(`{"auth-key":"admin-key"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := storage.NewJSONStore(dataDir)
 	accounts, err := account.NewService(store, 3)
 	if err != nil {
 		t.Fatal(err)
@@ -133,6 +168,7 @@ func newTestAppWithModels(t *testing.T, models ModelLister) (*App, *account.Serv
 		t.Fatal("failed to seed test account")
 	}
 	cfg := &config.Config{
+		ProjectRoot:             root,
 		AuthKey:                 "admin-key",
 		Version:                 "test-version",
 		DataDir:                 filepath.Dir(store.AccountsPath),
@@ -141,6 +177,43 @@ func newTestAppWithModels(t *testing.T, models ModelLister) (*App, *account.Serv
 		ImagePollTimeoutSecs:    1,
 	}
 	return New(cfg, accounts, auth.NewService(store, cfg.AuthKey), models), accounts
+}
+
+func TestBackupRunAppearsInListAndDetail(t *testing.T) {
+	app, _ := newTestApp(t)
+
+	run := httptest.NewRecorder()
+	runReq := httptest.NewRequest(http.MethodPost, "/api/backups/run", bytes.NewReader([]byte(`{}`)))
+	runReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(run, runReq)
+	if run.Code != http.StatusOK {
+		t.Fatalf("backup run status = %d body=%s", run.Code, run.Body.String())
+	}
+
+	list := httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/api/backups", nil)
+	listReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(list, listReq)
+	if list.Code != http.StatusOK {
+		t.Fatalf("backup list status = %d body=%s", list.Code, list.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(list.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	items := body["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("items = %#v", body["items"])
+	}
+	key := items[0].(map[string]any)["key"].(string)
+
+	detail := httptest.NewRecorder()
+	detailReq := httptest.NewRequest(http.MethodGet, "/api/backups/detail?key="+key, nil)
+	detailReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(detail, detailReq)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("backup detail status = %d body=%s", detail.Code, detail.Body.String())
+	}
 }
 
 type fakeModelLister struct{}
@@ -263,14 +336,14 @@ func TestDirectImageGenerationSupportsB64JSON(t *testing.T) {
 	}
 }
 
-func TestImageEditEndpointsReturnNotImplemented(t *testing.T) {
+func TestImageEditEndpointsValidateMultipart(t *testing.T) {
 	app, _ := newTestAppWithModels(t, fakeImageBackend{})
 
 	taskResp := httptest.NewRecorder()
 	taskReq := httptest.NewRequest(http.MethodPost, "/api/image-tasks/edits", bytes.NewReader([]byte("not multipart")))
 	taskReq.Header.Set("Authorization", "Bearer admin-key")
 	app.ServeHTTP(taskResp, taskReq)
-	if taskResp.Code != http.StatusNotImplemented {
+	if taskResp.Code != http.StatusBadRequest {
 		t.Fatalf("task edit status = %d body=%s", taskResp.Code, taskResp.Body.String())
 	}
 
@@ -278,8 +351,131 @@ func TestImageEditEndpointsReturnNotImplemented(t *testing.T) {
 	openAIReq := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader([]byte("not multipart")))
 	openAIReq.Header.Set("Authorization", "Bearer admin-key")
 	app.ServeHTTP(openAIResp, openAIReq)
-	if openAIResp.Code != http.StatusNotImplemented {
+	if openAIResp.Code != http.StatusBadRequest {
 		t.Fatalf("openai edit status = %d body=%s", openAIResp.Code, openAIResp.Body.String())
+	}
+}
+
+func TestImageEditEndpointsSupportMultipart(t *testing.T) {
+	app, _ := newTestAppWithModels(t, fakeImageBackend{})
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	_ = writer.WriteField("client_task_id", "edit-task-1")
+	_ = writer.WriteField("prompt", "把这张图改成复古海报")
+	_ = writer.WriteField("model", "gpt-image-2")
+	_ = writer.WriteField("size", "1:1")
+	part, err := writer.CreateFormFile("image", "first.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte("fake-image-bytes"))
+	_ = writer.Close()
+
+	taskResp := httptest.NewRecorder()
+	taskReq := httptest.NewRequest(http.MethodPost, "/api/image-tasks/edits", bytes.NewReader(body.Bytes()))
+	taskReq.Header.Set("Authorization", "Bearer admin-key")
+	taskReq.Header.Set("Content-Type", writer.FormDataContentType())
+	app.ServeHTTP(taskResp, taskReq)
+	if taskResp.Code != http.StatusOK {
+		t.Fatalf("task edit status = %d body=%s", taskResp.Code, taskResp.Body.String())
+	}
+
+	var listed map[string]any
+	for i := 0; i < 20; i++ {
+		resp := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/image-tasks?ids=edit-task-1", nil)
+		req.Header.Set("Authorization", "Bearer admin-key")
+		app.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("list status = %d body=%s", resp.Code, resp.Body.String())
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &listed); err != nil {
+			t.Fatal(err)
+		}
+		items := listed["items"].([]any)
+		if len(items) == 1 && items[0].(map[string]any)["status"] == "success" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	items := listed["items"].([]any)
+	task := items[0].(map[string]any)
+	if task["status"] != "success" {
+		t.Fatalf("edit task did not finish: %#v", task)
+	}
+	data := task["data"].([]any)
+	if data[0].(map[string]any)["b64_json"] != "Y2F0" {
+		t.Fatalf("task data = %#v", data)
+	}
+
+	openAIBody := &bytes.Buffer{}
+	openAIWriter := multipart.NewWriter(openAIBody)
+	_ = openAIWriter.WriteField("prompt", "把这张图改成复古海报")
+	_ = openAIWriter.WriteField("model", "gpt-image-2")
+	_ = openAIWriter.WriteField("response_format", "b64_json")
+	part, err = openAIWriter.CreateFormFile("image", "first.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte("fake-image-bytes"))
+	_ = openAIWriter.Close()
+
+	openAIResp := httptest.NewRecorder()
+	openAIReq := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(openAIBody.Bytes()))
+	openAIReq.Header.Set("Authorization", "Bearer admin-key")
+	openAIReq.Header.Set("Content-Type", openAIWriter.FormDataContentType())
+	app.ServeHTTP(openAIResp, openAIReq)
+	if openAIResp.Code != http.StatusOK {
+		t.Fatalf("openai edit status = %d body=%s", openAIResp.Code, openAIResp.Body.String())
+	}
+	var imageBody map[string]any
+	if err := json.Unmarshal(openAIResp.Body.Bytes(), &imageBody); err != nil {
+		t.Fatal(err)
+	}
+	data = imageBody["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["b64_json"] != "Y2F0" {
+		t.Fatalf("openai edit body = %#v", imageBody)
+	}
+}
+
+func TestResponsesAndMessagesCompat(t *testing.T) {
+	app, _ := newTestAppWithModels(t, fakeImageBackend{})
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{
+		"model": "auto",
+		"input": [{"role":"user","content":[{"type":"input_text","text":"你好"}]}]
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("responses status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["object"] != "response" || body["status"] != "completed" {
+		t.Fatalf("responses body = %#v", body)
+	}
+
+	msgResp := httptest.NewRecorder()
+	msgReq := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(`{
+		"model": "auto",
+		"messages": [{"role":"user","content":"你好"}]
+	}`)))
+	msgReq.Header.Set("x-api-key", "admin-key")
+	msgReq.Header.Set("anthropic-version", "2023-06-01")
+	app.ServeHTTP(msgResp, msgReq)
+	if msgResp.Code != http.StatusOK {
+		t.Fatalf("messages status = %d body=%s", msgResp.Code, msgResp.Body.String())
+	}
+	var msgBody map[string]any
+	if err := json.Unmarshal(msgResp.Body.Bytes(), &msgBody); err != nil {
+		t.Fatal(err)
+	}
+	if msgBody["type"] != "message" {
+		t.Fatalf("messages body = %#v", msgBody)
 	}
 }
 
@@ -322,11 +518,19 @@ func TestCreationTaskAliasesWork(t *testing.T) {
 }
 
 type fakeImageBackend struct {
-	fakeModelLister
+	fakeChatBackend
 }
 
 func (fakeImageBackend) GenerateImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string) ([]map[string]any, error) {
 	item := map[string]any{"url": "https://example.test/cat.png", "revised_prompt": prompt}
+	if strings.EqualFold(strings.TrimSpace(responseFormat), "b64_json") {
+		item["b64_json"] = "Y2F0"
+	}
+	return []map[string]any{item}, nil
+}
+
+func (fakeImageBackend) EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error) {
+	item := map[string]any{"url": "https://example.test/edit.png", "revised_prompt": prompt}
 	if strings.EqualFold(strings.TrimSpace(responseFormat), "b64_json") {
 		item["b64_json"] = "Y2F0"
 	}

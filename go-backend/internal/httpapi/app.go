@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"chatgpt2api-go-backend/internal/auth"
 	"chatgpt2api-go-backend/internal/config"
 	"chatgpt2api-go-backend/internal/imagetask"
+	"chatgpt2api-go-backend/internal/localdata"
 	"chatgpt2api-go-backend/internal/protocol"
 )
 
@@ -25,6 +27,7 @@ type App struct {
 	chat     ConversationStreamer
 	image    ImageGenerator
 	tasks    *imagetask.Service
+	local    *localdata.Services
 	mux      *http.ServeMux
 	started  time.Time
 }
@@ -39,6 +42,7 @@ type ConversationStreamer interface {
 
 type ImageGenerator interface {
 	GenerateImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string) ([]map[string]any, error)
+	EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error)
 }
 
 func New(cfg *config.Config, accounts *account.Service, authService *auth.Service, models ModelLister) *App {
@@ -47,6 +51,7 @@ func New(cfg *config.Config, accounts *account.Service, authService *auth.Servic
 		accounts: accounts,
 		auth:     authService,
 		models:   models,
+		local:    localdata.NewServices(cfg, cfg.ProjectRoot, cfg.DataDir),
 		mux:      http.NewServeMux(),
 		started:  time.Now(),
 	}
@@ -63,6 +68,7 @@ func New(cfg *config.Config, accounts *account.Service, authService *auth.Servic
 			time.Duration(cfg.ImagePollTimeoutSecs+60)*time.Second,
 		); err == nil {
 			app.tasks = tasks
+			app.tasks.SetHistoryRecorder(app.local.Images())
 		}
 	}
 	app.routes()
@@ -77,9 +83,44 @@ func (a *App) routes() {
 	a.mux.HandleFunc("/health", a.handleHealth)
 	a.mux.HandleFunc("/version", a.handleVersion)
 	a.mux.HandleFunc("/auth/login", a.handleLogin)
+	a.mux.HandleFunc("/api/settings", a.handleSettings)
+	a.mux.HandleFunc("/api/storage/info", a.handleStorageInfo)
+	a.mux.HandleFunc("/api/proxy", a.handleProxy)
+	a.mux.HandleFunc("/api/proxy/test", a.handleProxyTest)
 	a.mux.HandleFunc("/api/accounts", a.handleAccounts)
 	a.mux.HandleFunc("/api/accounts/refresh", a.handleAccountsRefresh)
 	a.mux.HandleFunc("/api/accounts/update", a.handleAccountsUpdate)
+	a.mux.HandleFunc("/api/auth/users/", a.handleUserKeyItem)
+	a.mux.HandleFunc("/api/auth/users", a.handleUserKeys)
+	a.mux.HandleFunc("/api/logs/delete", a.handleLogsDelete)
+	a.mux.HandleFunc("/api/logs", a.handleLogs)
+	a.mux.HandleFunc("/api/images/download/", a.handleImageDownloadSingle)
+	a.mux.HandleFunc("/api/images/download", a.handleImagesDownload)
+	a.mux.HandleFunc("/api/images/delete", a.handleImagesDelete)
+	a.mux.HandleFunc("/api/images/tags/", a.handleImageTagItem)
+	a.mux.HandleFunc("/api/images/tags", a.handleImageTags)
+	a.mux.HandleFunc("/api/images", a.handleImages)
+	a.mux.HandleFunc("/images/", a.handleStaticImage)
+	a.mux.HandleFunc("/image-thumbnails/", a.handleStaticImageThumbnail)
+	a.mux.HandleFunc("/api/image-history/delete", a.handleImageHistoryDelete)
+	a.mux.HandleFunc("/api/image-history/", a.handleImageHistoryImage)
+	a.mux.HandleFunc("/api/image-history", a.handleImageHistory)
+	a.mux.HandleFunc("/api/backups/run", a.handleBackupsRun)
+	a.mux.HandleFunc("/api/backups/delete", a.handleBackupsDelete)
+	a.mux.HandleFunc("/api/backups/detail", a.handleBackupsDetail)
+	a.mux.HandleFunc("/api/backups/download", a.handleBackupsDownload)
+	a.mux.HandleFunc("/api/backups", a.handleBackups)
+	a.mux.HandleFunc("/api/backup/test", a.handleBackupTest)
+	a.mux.HandleFunc("/api/imgbed/test", a.handleImgbedTest)
+	a.mux.HandleFunc("/api/register/events", a.handleRegisterEvents)
+	a.mux.HandleFunc("/api/register/start", a.handleRegisterStart)
+	a.mux.HandleFunc("/api/register/stop", a.handleRegisterStop)
+	a.mux.HandleFunc("/api/register/reset", a.handleRegisterReset)
+	a.mux.HandleFunc("/api/register", a.handleRegister)
+	a.mux.HandleFunc("/api/cpa/pools/", a.handleCPAPoolItem)
+	a.mux.HandleFunc("/api/cpa/pools", a.handleCPAPools)
+	a.mux.HandleFunc("/api/sub2api/servers/", a.handleSub2APIServerItem)
+	a.mux.HandleFunc("/api/sub2api/servers", a.handleSub2APIServers)
 	a.mux.HandleFunc("/api/image-tasks", a.handleImageTasks)
 	a.mux.HandleFunc("/api/image-tasks/generations", a.handleImageTaskGenerations)
 	a.mux.HandleFunc("/api/image-tasks/edits", a.handleImageTaskEdits)
@@ -88,6 +129,8 @@ func (a *App) routes() {
 	a.mux.HandleFunc("/api/creation-tasks/image-edits", a.handleImageTaskEdits)
 	a.mux.HandleFunc("/v1/models", a.handleModels)
 	a.mux.HandleFunc("/v1/chat/completions", a.handleChatCompletions)
+	a.mux.HandleFunc("/v1/responses", a.handleResponses)
+	a.mux.HandleFunc("/v1/messages", a.handleMessages)
 	a.mux.HandleFunc("/v1/images/generations", a.handleImagesGenerations)
 	a.mux.HandleFunc("/v1/images/edits", a.handleImagesEdits)
 }
@@ -157,6 +200,12 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		if items, ok := refreshResult["items"]; ok {
 			result["items"] = items
 		}
+		a.logEvent("account", "新增账号并刷新", map[string]any{
+			"added":     result["added"],
+			"skipped":   result["skipped"],
+			"refreshed": refreshResult["refreshed"],
+			"errors":    len(anySlice(refreshResult["errors"])),
+		})
 		writeJSON(w, http.StatusOK, result)
 	case http.MethodDelete:
 		var body struct {
@@ -212,7 +261,13 @@ func (a *App) handleAccountsRefresh(w http.ResponseWriter, r *http.Request) {
 		writeDetailError(w, http.StatusBadRequest, "access_tokens or account_ids is required")
 		return
 	}
-	writeJSON(w, http.StatusOK, a.accounts.RefreshAccounts(r.Context(), tokens))
+	result := a.accounts.RefreshAccounts(r.Context(), tokens)
+	a.logEvent("account", "刷新账号", map[string]any{
+		"requested": len(tokens),
+		"refreshed": result["refreshed"],
+		"errors":    len(anySlice(result["errors"])),
+	})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *App) handleAccountsUpdate(w http.ResponseWriter, r *http.Request) {
@@ -375,10 +430,31 @@ func (a *App) handleImageTaskEdits(w http.ResponseWriter, r *http.Request) {
 		writeMethodNotAllowed(w)
 		return
 	}
-	if _, ok := a.requireIdentity(w, r); !ok {
+	identity, ok := a.requireIdentity(w, r)
+	if !ok {
 		return
 	}
-	writeDetailError(w, http.StatusNotImplemented, "Go 后端本阶段先支持文生图任务，图生图任务将在下一阶段迁移")
+	prompt, model, size, _, _, images, err := parseImageEditRequest(r)
+	if err != nil {
+		writeDetailError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if a.tasks == nil {
+		writeDetailError(w, http.StatusNotImplemented, "image task upstream is not configured")
+		return
+	}
+	task, err := a.tasks.SubmitEdit(identity, imagetask.SubmitEditRequest{
+		ClientTaskID: firstFormValue(r, "client_task_id"),
+		Prompt:       prompt,
+		Model:        model,
+		Size:         size,
+		Images:       toProtocolImages(images),
+	})
+	if err != nil {
+		writeDetailError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
 }
 
 func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
@@ -418,6 +494,7 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 	for i := 0; i < body.N; i++ {
 		token, release, err := a.accounts.AcquireImageToken(r.Context(), nil)
 		if err != nil {
+			a.logEvent("call", "图片生成失败：无可用账号", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
 			writeOpenAIError(w, http.StatusServiceUnavailable, "no_available_account", err.Error())
 			return
 		}
@@ -425,12 +502,19 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 		release()
 		if err != nil {
 			a.accounts.MarkImageResult(token, false)
+			a.logEvent("call", "图片生成失败", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 			return
 		}
 		a.accounts.MarkImageResult(token, true)
 		data = append(data, items...)
 	}
+	a.local.Images().SaveHistoryRecord("/v1/images/generations", "generate", body.Model, body.Prompt, data, map[string]any{
+		"input_tokens":  0,
+		"output_tokens": 0,
+		"total_tokens":  0,
+	})
+	a.logEvent("call", "图片生成成功", map[string]any{"model": body.Model, "size": body.Size, "count": len(data)})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"created": time.Now().Unix(),
 		"data":    data,
@@ -445,7 +529,123 @@ func (a *App) handleImagesEdits(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireIdentity(w, r); !ok {
 		return
 	}
-	writeOpenAIError(w, http.StatusNotImplemented, "server_error", "Go 后端本阶段先支持文生图，图生图将在下一阶段迁移")
+	prompt, model, size, responseFormat, stream, images, err := parseImageEditRequest(r)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if a.image == nil {
+		writeOpenAIError(w, http.StatusNotImplemented, "server_error", "image edit upstream is not configured")
+		return
+	}
+	_ = responseFormat
+	_ = stream
+	var inputs []protocol.ImageInput
+	for _, item := range images {
+		inputs = append(inputs, protocol.ImageInput{
+			Data:     item.Data,
+			FileName: item.FileName,
+			MimeType: item.MimeType,
+		})
+	}
+	token, release, err := a.accounts.AcquireImageToken(r.Context(), nil)
+	if err != nil {
+		a.logEvent("call", "图片编辑失败：无可用账号", map[string]any{"model": model, "size": size, "error": err.Error()})
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_available_account", err.Error())
+		return
+	}
+	defer release()
+	data, err := a.image.EditImage(r.Context(), token, prompt, model, size, responseFormat, inputs)
+	if err != nil {
+		a.accounts.MarkImageResult(token, false)
+		a.logEvent("call", "图片编辑失败", map[string]any{"model": model, "size": size, "image_count": len(inputs), "error": err.Error()})
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return
+	}
+	a.accounts.MarkImageResult(token, true)
+	a.local.Images().SaveHistoryRecord("/v1/images/edits", "edit", model, prompt, data, map[string]any{
+		"input_tokens":  0,
+		"output_tokens": 0,
+		"total_tokens":  0,
+	})
+	a.logEvent("call", "图片编辑成功", map[string]any{"model": model, "size": size, "image_count": len(inputs), "count": len(data)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"created": time.Now().Unix(),
+		"data":    data,
+	})
+}
+
+func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+	if _, ok := a.requireIdentity(w, r); !ok {
+		return
+	}
+	var body map[string]any
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
+	if protocol.IsStream(body) {
+		result, err := protocol.Response(body, a.chat, a.image, a.accounts)
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		writeSSEJSON(w, map[string]any{"type": "response.created", "response": map[string]any{
+			"id":         result["id"],
+			"object":     "response",
+			"created_at": result["created_at"],
+			"status":     "in_progress",
+			"model":      result["model"],
+			"output":     []any{},
+		}})
+		writeSSEJSON(w, map[string]any{"type": "response.completed", "response": result})
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		return
+	}
+	result, err := protocol.Response(body, a.chat, a.image, a.accounts)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if authHeader == "" {
+		if apiKey := strings.TrimSpace(r.Header.Get("x-api-key")); apiKey != "" {
+			authHeader = "Bearer " + apiKey
+		}
+	}
+	if _, ok := a.requireIdentityWithHeader(w, r, authHeader); !ok {
+		return
+	}
+	var body map[string]any
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
+	result, err := protocol.AnthropicMessage(body, a.chat, a.accounts)
+	if err != nil {
+		writeDetailError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if protocol.IsStream(body) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *App) streamChatCompletion(w http.ResponseWriter, r *http.Request, accessToken string, body map[string]any) {
@@ -480,6 +680,15 @@ func (a *App) streamChatCompletion(w http.ResponseWriter, r *http.Request, acces
 
 func (a *App) requireIdentity(w http.ResponseWriter, r *http.Request) (*auth.Identity, bool) {
 	identity := a.auth.AuthenticateBearer(r.Header.Get("Authorization"))
+	if identity == nil {
+		writeDetailError(w, http.StatusUnauthorized, "密钥无效或已失效，请重新登录")
+		return nil, false
+	}
+	return identity, true
+}
+
+func (a *App) requireIdentityWithHeader(w http.ResponseWriter, r *http.Request, authorization string) (*auth.Identity, bool) {
+	identity := a.auth.AuthenticateBearer(authorization)
 	if identity == nil {
 		writeDetailError(w, http.StatusUnauthorized, "密钥无效或已失效，请重新登录")
 		return nil, false
@@ -561,6 +770,46 @@ func splitComma(value string) []string {
 		return nil
 	}
 	return cleanStrings(strings.Split(value, ","))
+}
+
+func (a *App) logEvent(logType, summary string, detail map[string]any) {
+	if a == nil || a.local == nil {
+		return
+	}
+	a.local.Logs().Add(logType, summary, detail)
+	log.Printf("[go-api] %s %s %s", logType, summary, compactLogDetail(detail))
+}
+
+func compactLogDetail(detail map[string]any) string {
+	if len(detail) == 0 {
+		return "{}"
+	}
+	data, err := json.Marshal(detail)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+func anySlice(value any) []any {
+	switch items := value.(type) {
+	case []any:
+		return items
+	case []map[string]string:
+		out := make([]any, 0, len(items))
+		for _, item := range items {
+			out = append(out, item)
+		}
+		return out
+	case []map[string]any:
+		out := make([]any, 0, len(items))
+		for _, item := range items {
+			out = append(out, item)
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 var ErrNotImplemented = errors.New("not implemented")

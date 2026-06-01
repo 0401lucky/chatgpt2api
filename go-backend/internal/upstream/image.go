@@ -6,9 +6,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
+	"mime"
 	"net/http"
 	urlpkg "net/url"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,6 +30,20 @@ func (s *Service) GenerateImage(ctx context.Context, accessToken, prompt, model,
 		model,
 		size,
 		responseFormat,
+		firstDuration(s.ImagePollTimeout, 120*time.Second),
+		firstDuration(s.ImagePollInitialWait, 10*time.Second),
+		firstDuration(s.ImagePollInterval, 10*time.Second),
+	)
+}
+
+func (s *Service) EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error) {
+	return s.NewClient(accessToken).EditImage(
+		ctx,
+		prompt,
+		model,
+		size,
+		responseFormat,
+		images,
 		firstDuration(s.ImagePollTimeout, 120*time.Second),
 		firstDuration(s.ImagePollInitialWait, 10*time.Second),
 		firstDuration(s.ImagePollInterval, 10*time.Second),
@@ -54,10 +74,56 @@ func (c *Client) GenerateImage(ctx context.Context, prompt, model, size, respons
 	if err != nil {
 		return nil, err
 	}
-	last, err := c.streamImageConversation(ctx, finalPrompt, model, requirements, conduitToken)
+	last, err := c.streamImageConversation(ctx, finalPrompt, model, requirements, conduitToken, nil)
 	if err != nil {
 		return nil, err
 	}
+	return c.imageDataFromLastEvent(ctx, last, prompt, responseFormat, true, pollTimeout, initialWait, pollInterval)
+}
+
+func (c *Client) EditImage(ctx context.Context, prompt, model, size, responseFormat string, images []protocol.ImageInput, pollTimeout, initialWait, pollInterval time.Duration) ([]map[string]any, error) {
+	if c.AccessToken == "" {
+		return nil, fmt.Errorf("authenticated upstream account required for image editing")
+	}
+	model = normalizeImageModel(model)
+	if !isSupportedImageModel(model) {
+		return nil, fmt.Errorf("unsupported image model, supported models: auto, gpt-image-1, gpt-image-2, codex-gpt-image-2")
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return nil, fmt.Errorf("prompt is required")
+	}
+	if len(images) == 0 {
+		return nil, fmt.Errorf("image is required")
+	}
+	references := make([]map[string]any, 0, len(images))
+	for index, input := range images {
+		ref, err := c.uploadImage(ctx, input, index+1)
+		if err != nil {
+			return nil, err
+		}
+		references = append(references, ref)
+	}
+	finalPrompt := buildImagePrompt(prompt, size)
+	if err := c.bootstrap(ctx); err != nil {
+		return nil, err
+	}
+	requirements, err := c.getChatRequirements(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conduitToken, err := c.prepareImageConversation(ctx, finalPrompt, model, requirements)
+	if err != nil {
+		return nil, err
+	}
+	last, err := c.streamImageConversation(ctx, finalPrompt, model, requirements, conduitToken, references)
+	if err != nil {
+		return nil, err
+	}
+	return c.imageDataFromLastEvent(ctx, last, prompt, responseFormat, true, pollTimeout, initialWait, pollInterval)
+}
+
+func (c *Client) imageDataFromLastEvent(ctx context.Context, last map[string]any, prompt, responseFormat string, shouldPoll bool, pollTimeout, initialWait, pollInterval time.Duration) ([]map[string]any, error) {
 	conversationID := cleanString(last["conversation_id"])
 	fileIDs := stringList(last["file_ids"])
 	sedimentIDs := stringList(last["sediment_ids"])
@@ -68,10 +134,10 @@ func (c *Client) GenerateImage(ctx context.Context, prompt, model, size, respons
 	if message != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 && blocked {
 		return nil, fmt.Errorf("%s", message)
 	}
-	if message != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 && turnUseCase != "image gen" {
+	if message != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 && !shouldPoll && turnUseCase != "image gen" {
 		return nil, fmt.Errorf("%s", message)
 	}
-	urls, err := c.resolveConversationImageURLs(ctx, conversationID, fileIDs, sedimentIDs, pollTarget, true, pollTimeout, initialWait, pollInterval)
+	urls, err := c.resolveConversationImageURLs(ctx, conversationID, fileIDs, sedimentIDs, pollTarget, shouldPoll || turnUseCase == "image gen", pollTimeout, initialWait, pollInterval)
 	if err != nil {
 		return nil, err
 	}
@@ -121,11 +187,11 @@ func (c *Client) prepareImageConversation(ctx context.Context, prompt, model str
 	return cleanString(result["conduit_token"]), nil
 }
 
-func (c *Client) streamImageConversation(ctx context.Context, prompt, model string, requirements ChatRequirements, conduitToken string) (map[string]any, error) {
+func (c *Client) streamImageConversation(ctx context.Context, prompt, model string, requirements ChatRequirements, conduitToken string, references []map[string]any) (map[string]any, error) {
 	path := "/backend-api/f/conversation"
 	payload := map[string]any{
 		"action":                               "next",
-		"messages":                             []map[string]any{imageUserMessage(prompt, nil)},
+		"messages":                             []map[string]any{imageUserMessage(prompt, references)},
 		"parent_message_id":                    newUUID(),
 		"model":                                imageModelSlug(model),
 		"client_prepare_state":                 "sent",
@@ -234,6 +300,75 @@ func (c *Client) postImageJSONPayload(ctx context.Context, path string, payload 
 	return c.doJSON(req, path)
 }
 
+func (c *Client) uploadImage(ctx context.Context, input protocol.ImageInput, index int) (map[string]any, error) {
+	raw := input.Data
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("image file is empty")
+	}
+	fileName := strings.TrimSpace(input.FileName)
+	if fileName == "" {
+		fileName = fmt.Sprintf("image_%d%s", index, imageExtensionFromMime(input.MimeType, raw))
+	}
+	mimeType := normalizeInputImageMime(input.MimeType, raw, fileName)
+	width, height := imageDimensions(raw)
+	path := "/backend-api/files"
+	uploadMeta, err := c.postImageJSONPayload(ctx, path, map[string]any{
+		"file_name": fileName,
+		"file_size": len(raw),
+		"use_case":  "multimodal",
+		"width":     width,
+		"height":    height,
+	}, c.headers(path, map[string]string{"Content-Type": "application/json", "Accept": "application/json"}))
+	if err != nil {
+		return nil, err
+	}
+	uploadURL := cleanString(uploadMeta["upload_url"])
+	fileID := cleanString(uploadMeta["file_id"])
+	if uploadURL == "" || fileID == "" {
+		return nil, fmt.Errorf("image upload metadata missing upload_url or file_id")
+	}
+	if err := c.putUploadBytes(ctx, uploadURL, raw, mimeType); err != nil {
+		return nil, err
+	}
+	confirmPath := "/backend-api/files/" + fileID + "/uploaded"
+	if _, err := c.postImageJSONPayload(ctx, confirmPath, map[string]any{}, c.headers(confirmPath, map[string]string{"Content-Type": "application/json", "Accept": "application/json"})); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"file_id":   fileID,
+		"file_name": fileName,
+		"file_size": len(raw),
+		"mime_type": mimeType,
+		"width":     width,
+		"height":    height,
+	}, nil
+}
+
+func (c *Client) putUploadBytes(ctx context.Context, uploadURL string, raw []byte, mimeType string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mimeType)
+	req.Header.Set("x-ms-blob-type", "BlockBlob")
+	req.Header.Set("x-ms-version", "2020-04-08")
+	req.Header.Set("Origin", c.BaseURL)
+	req.Header.Set("Referer", c.BaseURL+"/")
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.8")
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("image_upload failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return upstreamHTTPError("image_upload", resp.StatusCode, body)
+	}
+	return nil
+}
+
 func (c *Client) imageHeaders(path string, requirements ChatRequirements, conduitToken, accept string) map[string]string {
 	if accept == "" {
 		accept = "*/*"
@@ -333,15 +468,24 @@ func (c *Client) pollImageResults(ctx context.Context, conversationID string, ta
 }
 
 func (c *Client) getFileDownloadURL(ctx context.Context, conversationID, fileID string) (string, error) {
-	path := "/backend-api/files/download/" + fileID
-	if strings.TrimSpace(conversationID) != "" {
-		path += "?conversation_id=" + urlpkg.QueryEscape(strings.TrimSpace(conversationID)) + "&inline=false"
+	paths := []string{"/backend-api/files/" + fileID + "/download", "/backend-api/files/download/" + fileID}
+	var lastErr error
+	for _, basePath := range paths {
+		path := basePath
+		if strings.TrimSpace(conversationID) != "" {
+			path += "?conversation_id=" + urlpkg.QueryEscape(strings.TrimSpace(conversationID)) + "&inline=false"
+		}
+		payload, err := c.getJSON(ctx, path, path)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return firstNonEmpty(cleanString(payload["download_url"]), cleanString(payload["url"])), nil
 	}
-	payload, err := c.getJSON(ctx, path, path)
-	if err != nil {
-		return "", err
+	if lastErr != nil {
+		return "", lastErr
 	}
-	return firstNonEmpty(cleanString(payload["download_url"]), cleanString(payload["url"])), nil
+	return "", fmt.Errorf("download url not found")
 }
 
 func (c *Client) getAttachmentDownloadURL(ctx context.Context, conversationID, attachmentID string) (string, error) {
@@ -587,12 +731,55 @@ func isSupportedImageModel(model string) bool {
 func imageModelSlug(model string) string {
 	switch strings.TrimSpace(model) {
 	case "gpt-image-2":
-		return "gpt-5-5"
+		return "gpt-5-3"
 	case "codex-gpt-image-2":
 		return "codex-gpt-image-2"
 	default:
 		return "auto"
 	}
+}
+
+func imageExtensionFromMime(mimeType string, raw []byte) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "image/png":
+		return ".png"
+	}
+	switch http.DetectContentType(raw) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	default:
+		return ".png"
+	}
+}
+
+func normalizeInputImageMime(inputMime string, raw []byte, fileName string) string {
+	if mimeType := strings.ToLower(strings.TrimSpace(inputMime)); strings.HasPrefix(mimeType, "image/") {
+		return mimeType
+	}
+	if ext := strings.ToLower(filepath.Ext(fileName)); ext != "" {
+		if mimeType := mime.TypeByExtension(ext); mimeType != "" {
+			return mimeType
+		}
+	}
+	return http.DetectContentType(raw)
+}
+
+func imageDimensions(raw []byte) (int, int) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 {
+		return 0, 0
+	}
+	return cfg.Width, cfg.Height
 }
 
 func buildImagePrompt(prompt, size string) string {

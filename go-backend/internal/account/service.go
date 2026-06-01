@@ -456,14 +456,17 @@ func publicAccount(item map[string]any) map[string]any {
 		"type":               firstNonEmpty(clean(item["type"]), "Free"),
 		"status":             firstNonEmpty(clean(item["status"]), "正常"),
 		"quota":              intValue(item["quota"], 0),
+		"image_quota_unknown": boolValue(item["image_quota_unknown"], false),
 		"imageQuotaUnknown":  boolValue(item["image_quota_unknown"], false),
 		"email":              nullable(item["email"]),
 		"user_id":            nullable(item["user_id"]),
 		"limits_progress":    listValue(item["limits_progress"]),
 		"default_model_slug": nullable(item["default_model_slug"]),
+		"restore_at":         nullable(item["restore_at"]),
 		"restoreAt":          nullable(item["restore_at"]),
 		"success":            intValue(item["success"], 0),
 		"fail":               intValue(item["fail"], 0),
+		"last_used_at":       nullable(item["last_used_at"]),
 		"lastUsedAt":         nullable(item["last_used_at"]),
 	}
 }

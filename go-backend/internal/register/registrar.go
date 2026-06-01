@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	browserproxy "chatgpt2api-go-backend/internal/proxy"
 )
 
 const (
@@ -91,10 +93,7 @@ func newRegisterWorker(service *Service, index int, config map[string]any) (*reg
 }
 
 func registerHTTPClient(proxy string, timeout time.Duration, deviceID string) (*http.Client, error) {
-	base, err := httpClientForProxy(proxy, timeout)
-	if err != nil {
-		return nil, err
-	}
+	base := browserproxy.NewService(proxy).BrowserHTTPClientWithProfile("chrome/windows", timeout)
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err

@@ -49,3 +49,15 @@ func TestReplaceRegisterSessionUsesIndependentDeviceCookie(t *testing.T) {
 		t.Fatalf("login oai-did cookie = %q, want %q", got, loginDeviceID)
 	}
 }
+
+func TestRegisterHTTPClientAcceptsSocksProxyConfig(t *testing.T) {
+	client, err := registerHTTPClient("socks5://127.0.0.1:7890", 0, "device-id")
+	if err != nil {
+		t.Fatalf("registerHTTPClient socks proxy error: %v", err)
+	}
+	defer client.CloseIdleConnections()
+
+	if client.Jar == nil {
+		t.Fatalf("registerHTTPClient did not attach cookie jar")
+	}
+}

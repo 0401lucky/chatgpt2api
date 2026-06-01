@@ -534,6 +534,29 @@ func TestDirectImageGenerationSupportsB64JSON(t *testing.T) {
 	}
 }
 
+func TestDirectImageGenerationDefaultsToB64JSON(t *testing.T) {
+	app, _ := newTestAppWithModels(t, fakeImageBackend{})
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(`{
+		"prompt": "一只小猫",
+		"model": "gpt-image-2"
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	items := body["data"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["b64_json"] != "Y2F0" {
+		t.Fatalf("data = %#v", body["data"])
+	}
+}
+
 func TestImageEditEndpointsValidateMultipart(t *testing.T) {
 	app, _ := newTestAppWithModels(t, fakeImageBackend{})
 

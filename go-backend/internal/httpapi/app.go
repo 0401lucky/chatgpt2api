@@ -490,6 +490,9 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "n must be between 1 and 4")
 		return
 	}
+	if strings.TrimSpace(body.ResponseFormat) == "" {
+		body.ResponseFormat = "b64_json"
+	}
 	data := make([]map[string]any, 0, body.N)
 	for i := 0; i < body.N; i++ {
 		token, release, err := a.accounts.AcquireImageToken(r.Context(), nil)

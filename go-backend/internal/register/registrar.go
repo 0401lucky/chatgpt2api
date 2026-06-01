@@ -259,8 +259,22 @@ func (w *registerWorker) createAccount(ctx context.Context, name, birthdate stri
 
 func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, password string, mailbox map[string]any) (map[string]any, error) {
 	w.step("开始独立登录换 token")
+	originalClient := w.client
+	originalDeviceID := w.deviceID
+	loginDeviceID := newUUID()
+	loginClient, err := w.replaceRegisterSession(loginDeviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if loginClient != nil {
+			loginClient.CloseIdleConnections()
+		}
+		w.client = originalClient
+		w.deviceID = originalDeviceID
+	}()
 	codeVerifier, codeChallenge := generatePKCE()
-	values := authorizeParams(email, w.deviceID, randomToken(24), randomToken(24), codeChallenge)
+	values := authorizeParams(email, loginDeviceID, randomToken(24), randomToken(24), codeChallenge)
 	authorizeLogin := func() error {
 		status, _, err := w.request(ctx, http.MethodGet, registerAuthBase+"/api/accounts/authorize?"+values.Encode(), nil, w.navigateHeaders(registerPlatformBase+"/"), true)
 		if err != nil {
@@ -280,7 +294,12 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 		return nil, err
 	}
 	if status == http.StatusConflict {
-		w.step("邮箱提交 invalid_state，重新 authorize 后重试")
+		w.step("邮箱提交 invalid_state，重建登录会话后重试")
+		loginClient.CloseIdleConnections()
+		loginClient, err = w.replaceRegisterSession(loginDeviceID)
+		if err != nil {
+			return nil, err
+		}
 		if err := authorizeLogin(); err != nil {
 			return nil, err
 		}
@@ -360,6 +379,16 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 	}
 	w.step("token 换取完成")
 	return map[string]any{"access_token": accessToken, "refresh_token": refreshToken, "id_token": idToken}, nil
+}
+
+func (w *registerWorker) replaceRegisterSession(deviceID string) (*http.Client, error) {
+	client, err := registerHTTPClient(clean(w.config["proxy"]), 60*time.Second, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	w.client = client
+	w.deviceID = deviceID
+	return client, nil
 }
 
 func (w *registerWorker) submitLoginEmail(ctx context.Context, email string) (int, map[string]any, error) {

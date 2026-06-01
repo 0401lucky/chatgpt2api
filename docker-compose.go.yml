@@ -1,0 +1,26 @@
+services:
+  go-backend:
+    build:
+      context: .
+      dockerfile: go-backend/Dockerfile
+    image: chatgpt2api-go-backend:local
+    container_name: chatgpt2api-go-backend
+    restart: unless-stopped
+    ports:
+      - "${GO_BACKEND_PORT:-8001}:80"
+    environment:
+      PORT: "8001"
+      CHATGPT2API_CONFIG_FILE: /app/config.json
+      CHATGPT2API_DATA_DIR: /app/data
+      CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:-go-backend-local-key}
+      CHATGPT2API_PROXY: ${CHATGPT2API_PROXY:-}
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./VERSION:/app/VERSION:ro
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s

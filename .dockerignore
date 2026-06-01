@@ -6,9 +6,21 @@ __pycache__
 *.pyc
 *.pyo
 *.pyd
+*.log
+
+.claude
+.playwright-mcp
+.pytest_cache
+.worktrees
+
+data
+docs
+tmp*
 
 web/.next
 web/node_modules
+web/out
+web/tmp-*.log
 
 assets
 README.md

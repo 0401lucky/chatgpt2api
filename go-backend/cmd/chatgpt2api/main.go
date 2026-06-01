@@ -42,7 +42,7 @@ func main() {
 	accounts.SetRemoteRefresher(upstreamService)
 	app := httpapi.New(cfg, accounts, authService, upstreamService)
 
-	port := strings.TrimSpace(os.Getenv("PORT"))
+	port := strings.TrimSpace(os.Getenv("CHATGPT2API_GO_PORT"))
 	if port == "" {
 		port = "8001"
 	}

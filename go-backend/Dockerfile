@@ -42,7 +42,7 @@ COPY VERSION /app/VERSION
 
 RUN mkdir -p /app/data && chmod +x /usr/local/bin/chatgpt2api-go-entrypoint
 
-ENV PORT=8001 \
+ENV CHATGPT2API_GO_PORT=8001 \
     CHATGPT2API_CONFIG_FILE=/app/config.json \
     CHATGPT2API_DATA_DIR=/app/data
 

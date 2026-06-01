@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-PORT="${PORT:-8001}"
-export PORT
+CHATGPT2API_GO_PORT="${CHATGPT2API_GO_PORT:-8001}"
+export CHATGPT2API_GO_PORT
 
 chatgpt2api-go &
 go_pid="$!"

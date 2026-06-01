@@ -2,6 +2,10 @@
 
 本文用于 Go 后端单容器本地验证。
 
+根目录 `Dockerfile` 已经切换为 Go 后端镜像。
+Zeabur 这类默认读取根目录 `Dockerfile` 的平台，重新部署后会直接使用
+Go 后端，不需要单独切换到 `go-backend` 目录。
+
 当前形态不是两个容器：
 
 - 对外只有一个容器：`chatgpt2api-go-backend`

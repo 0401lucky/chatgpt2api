@@ -581,6 +581,20 @@ func (a *App) handleRegisterEvents(w http.ResponseWriter, r *http.Request) {
 	if flusher != nil {
 		flusher.Flush()
 	}
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			payload, _ := json.Marshal(a.local.Register().Get())
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}
 }
 
 func (a *App) handleCPAPools(w http.ResponseWriter, r *http.Request) {

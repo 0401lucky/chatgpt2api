@@ -123,6 +123,61 @@ func TestAccountRefreshWritesSystemLog(t *testing.T) {
 	}
 }
 
+func TestRegisterProviderEnableStatePersists(t *testing.T) {
+	app, _ := newTestApp(t)
+	body := []byte(`{
+		"mail": {
+			"request_timeout": 30,
+			"wait_timeout": 30,
+			"wait_interval": 2,
+			"providers": [
+				{"enable": false, "type": "gptmail", "api_key": "sk-gptmail", "default_domain": ""},
+				{"enable": true, "type": "yyds_mail", "api_base": "https://maliapi.215.im/v1", "api_key": "sk-yyds", "domain": [], "subdomain": "", "wildcard": false}
+			]
+		},
+		"proxy": "",
+		"total": 1,
+		"threads": 1,
+		"mode": "total",
+		"target_quota": 1,
+		"target_available": 1,
+		"check_interval": 5
+	}`)
+	save := httptest.NewRecorder()
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/register", bytes.NewReader(body))
+	saveReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(save, saveReq)
+	if save.Code != http.StatusOK {
+		t.Fatalf("save register status = %d body=%s", save.Code, save.Body.String())
+	}
+
+	getResp := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/api/register", nil)
+	getReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(getResp, getReq)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("get register status = %d body=%s", getResp.Code, getResp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(getResp.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	register := payload["register"].(map[string]any)
+	mail := register["mail"].(map[string]any)
+	providers := mail["providers"].([]any)
+	if len(providers) != 2 {
+		t.Fatalf("providers = %#v", providers)
+	}
+	first := providers[0].(map[string]any)
+	second := providers[1].(map[string]any)
+	if first["type"] != "gptmail" || first["enable"] != false {
+		t.Fatalf("first provider = %#v", first)
+	}
+	if second["type"] != "yyds_mail" || second["enable"] != true {
+		t.Fatalf("second provider = %#v", second)
+	}
+}
+
 func TestModelsRequireAuthAndUseLister(t *testing.T) {
 	app, _ := newTestAppWithModels(t, fakeModelLister{})
 	unauthorized := httptest.NewRecorder()

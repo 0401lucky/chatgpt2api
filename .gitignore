@@ -35,3 +35,8 @@ docker-compose-local.yml
 
 # Git cache
 git_cache/
+
+# Local Go test/build cache and temporary run logs
+go-backend/.gocache/
+tmp-*.log
+web/tmp-*.log

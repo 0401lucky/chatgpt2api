@@ -3,7 +3,6 @@ package httpapi
 import (
 	"archive/zip"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -521,13 +520,13 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"register": a.local.Register().Get()})
+		writeJSON(w, http.StatusOK, map[string]any{"register": a.register.Get()})
 	case http.MethodPost:
 		var body map[string]any
 		if !decodeJSONBody(w, r, &body) {
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"register": a.local.Register().Update(body)})
+		writeJSON(w, http.StatusOK, map[string]any{"register": a.register.Update(body)})
 	default:
 		writeMethodNotAllowed(w)
 	}
@@ -541,7 +540,7 @@ func (a *App) handleRegisterStart(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"register": a.local.Register().Start()})
+	writeJSON(w, http.StatusOK, map[string]any{"register": a.register.Start()})
 }
 
 func (a *App) handleRegisterStop(w http.ResponseWriter, r *http.Request) {
@@ -552,7 +551,7 @@ func (a *App) handleRegisterStop(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"register": a.local.Register().Stop()})
+	writeJSON(w, http.StatusOK, map[string]any{"register": a.register.Stop()})
 }
 
 func (a *App) handleRegisterReset(w http.ResponseWriter, r *http.Request) {
@@ -563,7 +562,7 @@ func (a *App) handleRegisterReset(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireAdmin(w, r); !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"register": a.local.Register().Reset()})
+	writeJSON(w, http.StatusOK, map[string]any{"register": a.register.Reset()})
 }
 
 func (a *App) handleRegisterEvents(w http.ResponseWriter, r *http.Request) {
@@ -576,19 +575,15 @@ func (a *App) handleRegisterEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
-	payload, _ := json.Marshal(a.local.Register().Get())
-	_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
-	if flusher != nil {
-		flusher.Flush()
-	}
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	ch := a.register.Subscribe(r.Context())
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-ticker.C:
-			payload, _ := json.Marshal(a.local.Register().Get())
+		case payload, ok := <-ch:
+			if !ok {
+				return
+			}
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
 			if flusher != nil {
 				flusher.Flush()

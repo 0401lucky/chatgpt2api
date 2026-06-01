@@ -17,6 +17,7 @@ import (
 	"chatgpt2api-go-backend/internal/imagetask"
 	"chatgpt2api-go-backend/internal/localdata"
 	"chatgpt2api-go-backend/internal/protocol"
+	"chatgpt2api-go-backend/internal/register"
 )
 
 type App struct {
@@ -28,6 +29,7 @@ type App struct {
 	image    ImageGenerator
 	tasks    *imagetask.Service
 	local    *localdata.Services
+	register *register.Service
 	mux      *http.ServeMux
 	started  time.Time
 }
@@ -52,6 +54,7 @@ func New(cfg *config.Config, accounts *account.Service, authService *auth.Servic
 		auth:     authService,
 		models:   models,
 		local:    localdata.NewServices(cfg, cfg.ProjectRoot, cfg.DataDir, accounts),
+		register: register.NewService(filepath.Join(cfg.DataDir, "register.json"), filepath.Join(cfg.DataDir, "mail_domain_reputation.json"), accounts),
 		mux:      http.NewServeMux(),
 		started:  time.Now(),
 	}

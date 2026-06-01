@@ -46,12 +46,13 @@ type AccountProvider interface {
 
 type Services struct {
 	Config     ConfigProvider
+	Accounts   AccountProvider
 	DataDir    string
 	ProjectDir string
 }
 
-func NewServices(cfg ConfigProvider, projectDir, dataDir string) *Services {
-	return &Services{Config: cfg, ProjectDir: projectDir, DataDir: dataDir}
+func NewServices(cfg ConfigProvider, projectDir, dataDir string, accounts AccountProvider) *Services {
+	return &Services{Config: cfg, Accounts: accounts, ProjectDir: projectDir, DataDir: dataDir}
 }
 
 func (s *Services) Logs() *LogService {
@@ -68,7 +69,7 @@ func (s *Services) Images() *ImageService {
 }
 
 func (s *Services) Register() *RegisterService {
-	return &RegisterService{Path: filepath.Join(s.DataDir, "register.json")}
+	return &RegisterService{Path: filepath.Join(s.DataDir, "register.json"), Accounts: s.Accounts}
 }
 
 func (s *Services) Backup() *BackupService {
@@ -620,17 +621,18 @@ func (s *ImageService) historyMetadataByPath() map[string]map[string]any {
 }
 
 type RegisterService struct {
-	Path string
+	Path     string
+	Accounts AccountProvider
 }
 
 func (s *RegisterService) Get() map[string]any {
 	raw := map[string]any{}
 	_ = loadJSON(s.Path, &raw)
-	return normalizeRegister(raw)
+	return s.withPoolMetrics(normalizeRegister(raw))
 }
 
 func (s *RegisterService) Update(updates map[string]any) map[string]any {
-	next := normalizeRegister(mergeMap(s.Get(), updates))
+	next := s.withPoolMetrics(normalizeRegister(mergeMap(s.Get(), updates)))
 	_ = saveJSON(s.Path, next)
 	return next
 }
@@ -649,22 +651,35 @@ func (s *RegisterService) Start() map[string]any {
 	})
 	current["logs"] = trimAnyList(logs, 300)
 	_ = saveJSON(s.Path, current)
-	return normalizeRegister(current)
+	return s.withPoolMetrics(normalizeRegister(current))
 }
 
 func (s *RegisterService) Stop() map[string]any {
 	current := s.Get()
 	current["enabled"] = false
 	_ = saveJSON(s.Path, current)
-	return current
+	return s.withPoolMetrics(current)
 }
 
 func (s *RegisterService) Reset() map[string]any {
 	current := s.Get()
 	current["stats"] = defaultRegisterStats(intValue(current["threads"], 1))
+	current = s.withPoolMetrics(current)
 	current["logs"] = []any{}
 	_ = saveJSON(s.Path, current)
 	return current
+}
+
+func (s *RegisterService) withPoolMetrics(register map[string]any) map[string]any {
+	if register == nil {
+		return register
+	}
+	stats := mergeMap(defaultRegisterStats(intValue(register["threads"], 1)), asMap(register["stats"]))
+	metrics := accountPoolMetrics(s.Accounts)
+	stats["current_quota"] = metrics["current_quota"]
+	stats["current_available"] = metrics["current_available"]
+	register["stats"] = stats
+	return register
 }
 
 type BackupService struct {
@@ -892,6 +907,28 @@ func normalizeRegister(raw map[string]any) map[string]any {
 
 func defaultRegisterStats(threads int) map[string]any {
 	return map[string]any{"success": 0, "fail": 0, "done": 0, "running": 0, "threads": threads, "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}
+}
+
+func accountPoolMetrics(accounts AccountProvider) map[string]any {
+	metrics := map[string]any{"current_quota": 0, "current_available": 0}
+	if accounts == nil {
+		return metrics
+	}
+	currentQuota := 0
+	currentAvailable := 0
+	for _, item := range accounts.ListAccounts() {
+		if clean(item["status"]) != "正常" {
+			continue
+		}
+		currentAvailable++
+		if boolValue(item["image_quota_unknown"], false) {
+			continue
+		}
+		currentQuota += intValue(item["quota"], 0)
+	}
+	metrics["current_quota"] = currentQuota
+	metrics["current_available"] = currentAvailable
+	return metrics
 }
 
 func loadJSON(path string, target any) error {

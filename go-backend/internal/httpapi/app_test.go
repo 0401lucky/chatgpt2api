@@ -178,6 +178,37 @@ func TestRegisterProviderEnableStatePersists(t *testing.T) {
 	}
 }
 
+func TestRegisterStatsReflectAccountPoolMetrics(t *testing.T) {
+	app, accounts := newTestApp(t)
+	accounts.AddAccounts([]string{"token-beta-1234567890", "token-gamma-1234567890"})
+	if item := accounts.UpdateAccount("token-beta-1234567890", map[string]any{"quota": 7, "status": "正常"}); item == nil {
+		t.Fatal("failed to update beta")
+	}
+	if item := accounts.UpdateAccount("token-gamma-1234567890", map[string]any{"quota": 9, "status": "限流"}); item == nil {
+		t.Fatal("failed to update gamma")
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/register", nil)
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("register status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	register := payload["register"].(map[string]any)
+	stats := register["stats"].(map[string]any)
+	if stats["current_available"] != float64(2) {
+		t.Fatalf("current_available = %#v stats=%#v", stats["current_available"], stats)
+	}
+	if stats["current_quota"] != float64(12) {
+		t.Fatalf("current_quota = %#v stats=%#v", stats["current_quota"], stats)
+	}
+}
+
 func TestModelsRequireAuthAndUseLister(t *testing.T) {
 	app, _ := newTestAppWithModels(t, fakeModelLister{})
 	unauthorized := httptest.NewRecorder()

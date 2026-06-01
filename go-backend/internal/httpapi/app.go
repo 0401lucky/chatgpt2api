@@ -51,7 +51,7 @@ func New(cfg *config.Config, accounts *account.Service, authService *auth.Servic
 		accounts: accounts,
 		auth:     authService,
 		models:   models,
-		local:    localdata.NewServices(cfg, cfg.ProjectRoot, cfg.DataDir),
+		local:    localdata.NewServices(cfg, cfg.ProjectRoot, cfg.DataDir, accounts),
 		mux:      http.NewServeMux(),
 		started:  time.Now(),
 	}

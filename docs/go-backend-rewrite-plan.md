@@ -21,7 +21,7 @@ Go 后端已经跑到核心可用阶段：
 - `nginx` 对外提供原 Web 静态页，Go 进程负责 API。
 - 原前端源码没有重写。
 - 账号池、账号刷新、设置、代理、用户密钥、日志、图片管理、图片历史、
-  本地备份、注册配置、CPA、Sub2API 管理接口已接入 Go。
+  本地备份、注册配置、注册机核心自动补号、CPA、Sub2API 管理接口已接入 Go。
 - `GET /health`、`POST /auth/login`、`GET /api/accounts`、
   `POST /api/accounts/refresh`、`GET /api/logs`、`GET /api/backups`、
   `GET /api/settings`、`GET /api/storage/info` 已纳入本地验证范围。
@@ -43,7 +43,11 @@ Go 后端已经跑到核心可用阶段：
 - `go test ./...` 已通过。
 - Docker Desktop 之前做过真实启动验证；当前这轮因本机 Docker Desktop 卡住，
   暂时改成本地 Go 进程烟测。
-- 仍待深迁：完整自动注册、R2 真上传、图床自动上传替换、
+- 注册机已接入 Go 版核心自动注册执行器，当前优先支持 `gptmail` / `yyds_mail`。
+  YYDSMail 已按原 Python 版保留默认域名池、域名学习、探索率、成功域名优先、
+  硬失败禁用、软失败不立即拉黑、通配邮箱、token 字段兼容、邮件列表字段兼容、
+  429/5xx 重试和验证码去重。
+- 仍待深迁：其它邮箱 provider、R2 真上传、图床自动上传替换、
   `/v1/responses` 与 `/v1/messages` 完整流式事件、大账号池正式压测。
 
 ### 历史推进记录
@@ -1241,7 +1245,8 @@ Go 并发更容易写出高并发，但也更容易出现状态竞争。
 
 1. 用真实测试账号完成账号刷新、文本、文生图、图生图全链路验证。
 2. 做正式压测，对比 Python 后端和 Go 后端的 CPU、内存、P95、错误率。
-3. 补齐注册机完整自动注册流程，而不仅是配置和状态接口。
+3. 补齐注册机其它邮箱 provider，并用真实邮箱 API Key、代理和 OpenAI 上游环境
+   做完整注册验证。
 4. 接入 R2 真实远端上传和恢复链路。
 5. 深迁图床自动上传替换链路。
 6. 补完 Responses、Messages 的完整流式事件和更多兼容细节。

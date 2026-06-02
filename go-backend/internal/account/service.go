@@ -20,6 +20,10 @@ type RemoteRefresher interface {
 	FetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, error)
 }
 
+type OAuthTokenRefresher interface {
+	RefreshAccessToken(ctx context.Context, refreshToken string) (map[string]any, error)
+}
+
 type Service struct {
 	mu                      sync.Mutex
 	store                   Store
@@ -264,16 +268,77 @@ func (s *Service) RefreshAccounts(ctx context.Context, tokens []string) map[stri
 		return map[string]any{"refreshed": refreshed, "errors": errorsOut, "items": s.ListAccounts()}
 	}
 	for _, token := range cleaned {
-		remoteInfo, err := refresher.FetchRemoteInfo(ctx, token)
+		finalToken, remoteInfo, err := s.fetchWithOAuthRefresh(ctx, refresher, token)
 		if err != nil {
-			errorsOut = append(errorsOut, publicError(token, safeError(token, err.Error())))
+			if isInvalidTokenRefreshError(err) {
+				_ = s.updateAccountFields(finalToken, map[string]any{"status": "异常", "quota": 0}, false)
+			}
+			errorsOut = append(errorsOut, publicError(finalToken, safeError(finalToken, err.Error())))
 			continue
 		}
-		if item := s.updateAccountFields(token, remoteInfo, false); item != nil {
+		if item := s.updateAccountFields(finalToken, remoteInfo, false); item != nil {
 			refreshed++
 		}
 	}
 	return map[string]any{"refreshed": refreshed, "errors": errorsOut, "items": s.ListAccounts()}
+}
+
+func (s *Service) fetchWithOAuthRefresh(ctx context.Context, refresher RemoteRefresher, accessToken string) (string, map[string]any, error) {
+	remoteInfo, err := refresher.FetchRemoteInfo(ctx, accessToken)
+	if err == nil {
+		return accessToken, remoteInfo, nil
+	}
+	if !isInvalidTokenRefreshError(err) {
+		return accessToken, nil, err
+	}
+	oauthRefresher, ok := refresher.(OAuthTokenRefresher)
+	if !ok {
+		return accessToken, nil, err
+	}
+	account := s.GetAccount(accessToken)
+	refreshToken := clean(account["refresh_token"])
+	if refreshToken == "" {
+		return accessToken, nil, err
+	}
+	newTokens, refreshErr := oauthRefresher.RefreshAccessToken(ctx, refreshToken)
+	if refreshErr != nil {
+		return accessToken, nil, err
+	}
+	rotated := s.rotateAccessToken(accessToken, newTokens)
+	if rotated == "" {
+		return accessToken, nil, err
+	}
+	remoteInfo, retryErr := refresher.FetchRemoteInfo(ctx, rotated)
+	if retryErr != nil {
+		return rotated, nil, retryErr
+	}
+	return rotated, remoteInfo, nil
+}
+
+func (s *Service) rotateAccessToken(oldAccessToken string, newTokens map[string]any) string {
+	oldAccessToken = clean(oldAccessToken)
+	newAccessToken := clean(newTokens["access_token"])
+	if oldAccessToken == "" || newAccessToken == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := s.findIndexLocked(oldAccessToken)
+	if index < 0 {
+		return ""
+	}
+	next := copyMap(s.items[index])
+	next["access_token"] = newAccessToken
+	if refreshToken := clean(newTokens["refresh_token"]); refreshToken != "" {
+		next["refresh_token"] = refreshToken
+	}
+	normalized := normalizeAccount(next)
+	if normalized == nil {
+		return ""
+	}
+	s.items[index] = normalized
+	_ = s.saveLocked()
+	return newAccessToken
 }
 
 func (s *Service) GetAvailableAccessTokenFor(ctx context.Context, allow func(map[string]any) bool) (string, error) {
@@ -451,23 +516,23 @@ func publicAccount(item map[string]any) map[string]any {
 		return nil
 	}
 	return map[string]any{
-		"id":                 AccountID(token),
-		"token_preview":      TokenPreview(token),
-		"type":               firstNonEmpty(clean(item["type"]), "Free"),
-		"status":             firstNonEmpty(clean(item["status"]), "正常"),
-		"quota":              intValue(item["quota"], 0),
+		"id":                  AccountID(token),
+		"token_preview":       TokenPreview(token),
+		"type":                firstNonEmpty(clean(item["type"]), "Free"),
+		"status":              firstNonEmpty(clean(item["status"]), "正常"),
+		"quota":               intValue(item["quota"], 0),
 		"image_quota_unknown": boolValue(item["image_quota_unknown"], false),
-		"imageQuotaUnknown":  boolValue(item["image_quota_unknown"], false),
-		"email":              nullable(item["email"]),
-		"user_id":            nullable(item["user_id"]),
-		"limits_progress":    listValue(item["limits_progress"]),
-		"default_model_slug": nullable(item["default_model_slug"]),
-		"restore_at":         nullable(item["restore_at"]),
-		"restoreAt":          nullable(item["restore_at"]),
-		"success":            intValue(item["success"], 0),
-		"fail":               intValue(item["fail"], 0),
-		"last_used_at":       nullable(item["last_used_at"]),
-		"lastUsedAt":         nullable(item["last_used_at"]),
+		"imageQuotaUnknown":   boolValue(item["image_quota_unknown"], false),
+		"email":               nullable(item["email"]),
+		"user_id":             nullable(item["user_id"]),
+		"limits_progress":     listValue(item["limits_progress"]),
+		"default_model_slug":  nullable(item["default_model_slug"]),
+		"restore_at":          nullable(item["restore_at"]),
+		"restoreAt":           nullable(item["restore_at"]),
+		"success":             intValue(item["success"], 0),
+		"fail":                intValue(item["fail"], 0),
+		"last_used_at":        nullable(item["last_used_at"]),
+		"lastUsedAt":          nullable(item["last_used_at"]),
 	}
 }
 
@@ -534,6 +599,15 @@ func safeError(token, message string) string {
 		return "refresh failed"
 	}
 	return strings.ReplaceAll(message, token, "[access_token]")
+}
+
+func isInvalidTokenRefreshError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "/backend-api/me failed: HTTP 401") ||
+		strings.Contains(message, "token_invalidated")
 }
 
 func copyMap(item map[string]any) map[string]any {

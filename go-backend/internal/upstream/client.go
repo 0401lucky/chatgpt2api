@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -23,6 +24,8 @@ const (
 	defaultUserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
 	defaultSecCHUA           = `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`
 	defaultProfile           = "edge101"
+	platformOAuthClientID    = "app_2SKx67EdpoN0G6j64rFvigXD"
+	defaultOAuthTokenURL     = "https://auth.openai.com/oauth/token"
 )
 
 type AccountLookup interface {
@@ -33,6 +36,7 @@ type Service struct {
 	BaseURL              string
 	Lookup               AccountLookup
 	Proxy                *proxy.Service
+	OAuthTokenURL        string
 	ImagePollTimeout     time.Duration
 	ImagePollInitialWait time.Duration
 	ImagePollInterval    time.Duration
@@ -70,6 +74,56 @@ func (s *Service) NewClient(accessToken string) *Client {
 
 func (s *Service) FetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, error) {
 	return s.NewClient(accessToken).FetchRemoteInfo(ctx)
+}
+
+func (s *Service) RefreshAccessToken(ctx context.Context, refreshToken string) (map[string]any, error) {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil, fmt.Errorf("refresh_token is required")
+	}
+	client := (&proxy.Service{}).BrowserHTTPClientWithProfile(defaultProfile, 60*time.Second)
+	if s.Proxy != nil {
+		client = s.Proxy.BrowserHTTPClientWithProfile(defaultProfile, 60*time.Second)
+	}
+	form := url.Values{
+		"grant_type":    []string{"refresh_token"},
+		"refresh_token": []string{refreshToken},
+		"client_id":     []string{platformOAuthClientID},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.oauthTokenURL(), strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", defaultUserAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("oauth_refresh failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, upstreamHTTPError("oauth_refresh", resp.StatusCode, body)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	if cleanString(payload["access_token"]) == "" {
+		return nil, fmt.Errorf("oauth_refresh response missing access_token")
+	}
+	if cleanString(payload["refresh_token"]) == "" {
+		payload["refresh_token"] = refreshToken
+	}
+	return payload, nil
+}
+
+func (s *Service) oauthTokenURL() string {
+	if value := strings.TrimSpace(s.OAuthTokenURL); value != "" {
+		return value
+	}
+	return defaultOAuthTokenURL
 }
 
 func (s *Service) ListModels(ctx context.Context) (map[string]any, error) {

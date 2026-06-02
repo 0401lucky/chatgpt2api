@@ -254,8 +254,13 @@ func (a *App) handleAccountsRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokens := cleanStrings(body.AccessTokens)
-	if len(tokens) == 0 && len(body.AccountIDs) > 0 {
-		tokens = a.accounts.ListTokensByIDs(body.AccountIDs)
+	accountIDs := cleanStrings(body.AccountIDs)
+	if len(tokens) == 0 && len(accountIDs) > 0 {
+		tokens = a.accounts.ListTokensByIDs(accountIDs)
+		if len(tokens) == 0 {
+			writeDetailError(w, http.StatusNotFound, "accounts not found")
+			return
+		}
 	}
 	if len(tokens) == 0 {
 		tokens = a.accounts.ListTokens()

@@ -88,6 +88,43 @@ func TestFetchRemoteInfo(t *testing.T) {
 	}
 }
 
+func TestRefreshAccessTokenPostsOAuthRefreshForm(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/token" {
+			t.Fatalf("path = %s", r.URL.String())
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s", r.Method)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("grant_type") != "refresh_token" {
+			t.Fatalf("grant_type = %q", r.Form.Get("grant_type"))
+		}
+		if r.Form.Get("refresh_token") != "refresh-old" {
+			t.Fatalf("refresh_token = %q", r.Form.Get("refresh_token"))
+		}
+		if r.Form.Get("client_id") != platformOAuthClientID {
+			t.Fatalf("client_id = %q", r.Form.Get("client_id"))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "access-new"})
+	}))
+	defer server.Close()
+
+	service := &Service{OAuthTokenURL: server.URL + "/oauth/token"}
+	tokens, err := service.RefreshAccessToken(context.Background(), "refresh-old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens["access_token"] != "access-new" {
+		t.Fatalf("access_token = %#v", tokens["access_token"])
+	}
+	if tokens["refresh_token"] != "refresh-old" {
+		t.Fatalf("refresh_token fallback = %#v", tokens["refresh_token"])
+	}
+}
+
 func TestStreamConversation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

@@ -98,6 +98,33 @@ func TestCreateAccountReportsRefreshNotImplemented(t *testing.T) {
 	}
 }
 
+func TestAccountRefreshWithMissingAccountIDsDoesNotRefreshAll(t *testing.T) {
+	app, accounts := newTestApp(t)
+	refresher := &fakeAccountRefresher{
+		info: map[string]any{"quota": 99, "type": "Team", "status": "正常"},
+	}
+	accounts.SetRemoteRefresher(refresher)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/refresh", bytes.NewReader([]byte(`{"account_ids":["missing-account-id"]}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("refresh status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if refresher.calls != 0 {
+		t.Fatalf("missing account id should not call refresher, calls = %d", refresher.calls)
+	}
+
+	items := accounts.ListAccounts()
+	if len(items) != 1 {
+		t.Fatalf("items = %#v", items)
+	}
+	if items[0]["quota"] != 5 || items[0]["type"] != "Plus" {
+		t.Fatalf("missing account id should not refresh existing accounts, item = %#v", items[0])
+	}
+}
+
 func TestAccountRefreshWritesSystemLog(t *testing.T) {
 	app, _ := newTestApp(t)
 	resp := httptest.NewRecorder()
@@ -418,6 +445,23 @@ type fakeModelLister struct{}
 
 func (fakeModelLister) ListModels(context.Context) (map[string]any, error) {
 	return map[string]any{"object": "list", "data": []any{}}, nil
+}
+
+type fakeAccountRefresher struct {
+	calls int
+	info  map[string]any
+	err   error
+}
+
+func (f *fakeAccountRefresher) FetchRemoteInfo(context.Context, string) (map[string]any, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.info != nil {
+		return f.info, nil
+	}
+	return map[string]any{"quota": 1, "type": "Free", "status": "正常"}, nil
 }
 
 func TestChatCompletionsUsesAccountPool(t *testing.T) {

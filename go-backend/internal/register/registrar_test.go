@@ -1,6 +1,9 @@
 package register
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 )
@@ -59,5 +62,34 @@ func TestRegisterHTTPClientAcceptsSocksProxyConfig(t *testing.T) {
 
 	if client.Jar == nil {
 		t.Fatalf("registerHTTPClient did not attach cookie jar")
+	}
+}
+
+func TestRequestDetailedWithFinalURLReturnsRedirectCallbackCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			http.Redirect(w, r, "/callback?code=oauth-code&state=state-1", http.StatusFound)
+		case "/callback":
+			http.Redirect(w, r, "/done", http.StatusFound)
+		case "/done":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	worker := &registerWorker{client: server.Client()}
+	status, payload, _, finalURL, err := worker.requestDetailedWithFinalURL(context.Background(), http.MethodGet, server.URL+"/start", nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d payload=%#v", status, payload)
+	}
+	if code := oauthCode(finalURL); code != "oauth-code" {
+		t.Fatalf("finalURL = %q, code = %q", finalURL, code)
 	}
 }

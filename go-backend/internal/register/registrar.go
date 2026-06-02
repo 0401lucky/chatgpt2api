@@ -274,20 +274,32 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 	}()
 	codeVerifier, codeChallenge := generatePKCE()
 	values := authorizeParams(email, loginDeviceID, randomToken(24), randomToken(24), codeChallenge)
-	authorizeLogin := func() error {
-		status, _, err := w.request(ctx, http.MethodGet, registerAuthBase+"/api/accounts/authorize?"+values.Encode(), nil, w.navigateHeaders(registerPlatformBase+"/"), true)
+	authorizeLogin := func() (string, error) {
+		status, _, _, finalURL, err := w.requestDetailedWithFinalURL(ctx, http.MethodGet, registerAuthBase+"/api/accounts/authorize?"+values.Encode(), nil, w.navigateHeaders(registerPlatformBase+"/"), true)
 		if err != nil {
-			return err
+			return "", err
+		}
+		if code := oauthCode(finalURL); code != "" {
+			return code, nil
 		}
 		if status != http.StatusOK {
-			return fmt.Errorf("platform_login_authorize_http_%d", status)
+			return "", fmt.Errorf("platform_login_authorize_http_%d", status)
 		}
-		return nil
+		return "", nil
 	}
-	if err := authorizeLogin(); err != nil {
+	callbackCode, err := authorizeLogin()
+	if err != nil {
 		return nil, err
 	}
 	w.step("登录 authorize 完成")
+	if callbackCode != "" {
+		if tokens, tokenErr := w.exchangeOAuthCode(ctx, codeVerifier, callbackCode); tokenErr == nil {
+			w.step("authorize 已返回 OAuth code，跳过密码校验")
+			return tokens, nil
+		} else {
+			w.step("authorize 已返回 OAuth code，但 token 换取失败，继续尝试密码校验")
+		}
+	}
 	status, payload, err := w.submitLoginEmail(ctx, email)
 	if err != nil {
 		return nil, err
@@ -299,8 +311,12 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 		if err != nil {
 			return nil, err
 		}
-		if err := authorizeLogin(); err != nil {
+		callbackCode, err = authorizeLogin()
+		if err != nil {
 			return nil, err
+		}
+		if callbackCode != "" {
+			return w.exchangeOAuthCode(ctx, codeVerifier, callbackCode)
 		}
 		status, payload, err = w.submitLoginEmail(ctx, email)
 		if err != nil {
@@ -357,6 +373,15 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 	if code == "" {
 		return nil, fmt.Errorf("token exchange callback code not found")
 	}
+	tokens, err := w.exchangeOAuthCode(ctx, codeVerifier, code)
+	if err != nil {
+		return nil, err
+	}
+	w.step("token 换取完成")
+	return tokens, nil
+}
+
+func (w *registerWorker) exchangeOAuthCode(ctx context.Context, codeVerifier, code string) (map[string]any, error) {
 	status, tokenPayload, err := w.requestForm(ctx, registerAuthBase+"/oauth/token", url.Values{
 		"grant_type":    []string{"authorization_code"},
 		"code":          []string{code},
@@ -376,7 +401,6 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 	if accessToken == "" || refreshToken == "" || idToken == "" {
 		return nil, fmt.Errorf("token exchange response missing access_token, refresh_token, or id_token")
 	}
-	w.step("token 换取完成")
 	return map[string]any{"access_token": accessToken, "refresh_token": refreshToken, "id_token": idToken}, nil
 }
 
@@ -625,11 +649,16 @@ func (w *registerWorker) request(ctx context.Context, method, target string, pay
 }
 
 func (w *registerWorker) requestDetailed(ctx context.Context, method, target string, payload any, headers map[string]string, followRedirects bool) (int, map[string]any, http.Header, error) {
+	status, payloadMap, responseHeaders, _, err := w.requestDetailedWithFinalURL(ctx, method, target, payload, headers, followRedirects)
+	return status, payloadMap, responseHeaders, err
+}
+
+func (w *registerWorker) requestDetailedWithFinalURL(ctx context.Context, method, target string, payload any, headers map[string]string, followRedirects bool) (int, map[string]any, http.Header, string, error) {
 	var bodyData []byte
 	if payload != nil {
 		data, err := json.Marshal(payload)
 		if err != nil {
-			return 0, nil, nil, err
+			return 0, nil, nil, "", err
 		}
 		bodyData = data
 	}
@@ -641,13 +670,33 @@ func (w *registerWorker) requestDetailed(ctx context.Context, method, target str
 	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
+		redirectCodeURL := ""
+		if followRedirects {
+			withRedirectHistory := *w.client
+			previousCheckRedirect := withRedirectHistory.CheckRedirect
+			withRedirectHistory.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+				if redirectCodeURL == "" {
+					if oauthCode(req.URL.String()) != "" {
+						redirectCodeURL = req.URL.String()
+					}
+				}
+				if previousCheckRedirect != nil {
+					return previousCheckRedirect(req, via)
+				}
+				if len(via) >= 10 {
+					return fmt.Errorf("stopped after 10 redirects")
+				}
+				return nil
+			}
+			client = &withRedirectHistory
+		}
 		var body io.Reader
 		if payload != nil {
 			body = bytes.NewReader(bodyData)
 		}
 		req, err := http.NewRequestWithContext(ctx, method, target, body)
 		if err != nil {
-			return 0, nil, nil, err
+			return 0, nil, nil, "", err
 		}
 		for key, value := range headers {
 			if strings.TrimSpace(value) != "" {
@@ -661,7 +710,7 @@ func (w *registerWorker) requestDetailed(ctx context.Context, method, target str
 				time.Sleep(time.Second)
 				continue
 			}
-			return 0, nil, nil, err
+			return 0, nil, nil, "", err
 		}
 		defer resp.Body.Close()
 		payloadMap := map[string]any{}
@@ -675,12 +724,19 @@ func (w *registerWorker) requestDetailed(ctx context.Context, method, target str
 				payloadMap["body"] = string(data)
 			}
 		}
-		return resp.StatusCode, payloadMap, resp.Header.Clone(), nil
+		finalURL := ""
+		if resp.Request != nil && resp.Request.URL != nil {
+			finalURL = resp.Request.URL.String()
+		}
+		if redirectCodeURL != "" {
+			finalURL = redirectCodeURL
+		}
+		return resp.StatusCode, payloadMap, resp.Header.Clone(), finalURL, nil
 	}
 	if lastErr != nil {
-		return 0, nil, nil, lastErr
+		return 0, nil, nil, "", lastErr
 	}
-	return 0, nil, nil, fmt.Errorf("request failed")
+	return 0, nil, nil, "", fmt.Errorf("request failed")
 }
 
 func (w *registerWorker) requestForm(ctx context.Context, target string, form url.Values) (int, map[string]any, error) {

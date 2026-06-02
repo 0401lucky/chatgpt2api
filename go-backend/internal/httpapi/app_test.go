@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -206,6 +207,54 @@ func TestAccountRefreshAsyncJobPollsUntilComplete(t *testing.T) {
 	item := items[0].(map[string]any)
 	if item["quota"] != float64(42) || item["type"] != "Team" || item["email"] != "async@example.test" {
 		t.Fatalf("items = %#v", items)
+	}
+}
+
+func TestAccountRefreshLargeRequestAutoStartsAsyncJob(t *testing.T) {
+	app, accounts := newTestApp(t)
+	tokens := make([]string, 0, accountRefreshAutoAsyncThreshold+1)
+	for i := 0; i < accountRefreshAutoAsyncThreshold; i++ {
+		tokens = append(tokens, "token-large-"+strings.Repeat("x", 20)+fmt.Sprint(i))
+	}
+	accounts.AddAccounts(tokens)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/refresh", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusAccepted {
+		t.Fatalf("refresh status = %d body=%s", resp.Code, resp.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["async"] != true {
+		t.Fatalf("async flag = %#v body=%#v", body["async"], body)
+	}
+	job := body["job"].(map[string]any)
+	if job["id"] == "" || job["requested"] != float64(accountRefreshAutoAsyncThreshold+1) {
+		t.Fatalf("job = %#v", job)
+	}
+	if body["refreshed"] != float64(0) || len(body["errors"].([]any)) != 0 {
+		t.Fatalf("compat fields = refreshed:%#v errors:%#v", body["refreshed"], body["errors"])
+	}
+
+	logs := httptest.NewRecorder()
+	logsReq := httptest.NewRequest(http.MethodGet, "/api/logs?type=account", nil)
+	logsReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(logs, logsReq)
+	if logs.Code != http.StatusOK {
+		t.Fatalf("logs status = %d body=%s", logs.Code, logs.Body.String())
+	}
+	var logBody map[string]any
+	if err := json.Unmarshal(logs.Body.Bytes(), &logBody); err != nil {
+		t.Fatal(err)
+	}
+	items := logBody["items"].([]any)
+	if len(items) == 0 || items[0].(map[string]any)["summary"] != "提交账号刷新任务" {
+		t.Fatalf("logs = %#v", logBody)
 	}
 }
 

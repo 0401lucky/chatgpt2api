@@ -47,6 +47,8 @@ type ImageGenerator interface {
 	EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error)
 }
 
+const accountRefreshAutoAsyncThreshold = 10
+
 func New(cfg *config.Config, accounts *account.Service, authService *auth.Service, models ModelLister) *App {
 	app := &App{
 		config:   cfg,
@@ -271,17 +273,25 @@ func (a *App) handleAccountsRefresh(w http.ResponseWriter, r *http.Request) {
 		writeDetailError(w, http.StatusBadRequest, "access_tokens or account_ids is required")
 		return
 	}
-	if body.Async {
+	autoAsync := len(tokens) > accountRefreshAutoAsyncThreshold
+	if body.Async || autoAsync {
 		job, err := a.accounts.StartRefreshJob(tokens)
 		if err != nil {
 			writeDetailError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		a.logEvent("account", "提交账号刷新任务", map[string]any{
-			"requested": len(tokens),
-			"job_id":    job["id"],
+			"requested":  len(tokens),
+			"job_id":     job["id"],
+			"auto_async": autoAsync,
 		})
-		writeJSON(w, http.StatusAccepted, map[string]any{"job": job, "items": a.accounts.ListAccounts()})
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"job":       job,
+			"items":     a.accounts.ListAccounts(),
+			"refreshed": 0,
+			"errors":    []map[string]string{},
+			"async":     true,
+		})
 		return
 	}
 	result := a.accounts.RefreshAccounts(r.Context(), tokens)

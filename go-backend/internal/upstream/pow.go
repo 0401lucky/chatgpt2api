@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"math/rand"
 	"regexp"
+	"strconv"
 	"time"
 )
 
 const defaultPOWScript = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 
 var scriptSrcRE = regexp.MustCompile(`(?is)<script[^>]+src=["']([^"']+)["']`)
+var powProcessStart = time.Now()
 
 func parsePOWResources(html string) ([]string, string) {
 	matches := scriptSrcRE.FindAllStringSubmatch(html, -1)
@@ -39,7 +41,7 @@ func parsePOWResources(html string) ([]string, string) {
 }
 
 func buildLegacyRequirementsToken(userAgent string, scriptSources []string, dataBuild string) string {
-	seed := fmt.Sprintf("%f", rand.Float64())
+	seed := strconv.FormatFloat(rand.Float64(), 'g', -1, 64)
 	config := buildPOWConfig(userAgent, scriptSources, dataBuild)
 	answer, _ := powGenerate(seed, "0fffff", config, 500000)
 	return "gAAAAAC" + answer
@@ -59,40 +61,40 @@ func buildPOWConfig(userAgent string, scriptSources []string, dataBuild string) 
 		scriptSources = []string{defaultPOWScript}
 	}
 	navigatorKeys := []string{
-		"registerProtocolHandler-function registerProtocolHandler() { [native code] }",
-		"storage-[object StorageManager]",
-		"locks-[object LockManager]",
-		"appCodeName-Mozilla",
-		"permissions-[object Permissions]",
-		"share-function share() { [native code] }",
-		"webdriver-false",
-		"managed-[object NavigatorManagedData]",
-		"canShare-function canShare() { [native code] }",
-		"vendor-Google Inc.",
-		"mediaDevices-[object MediaDevices]",
-		"vibrate-function vibrate() { [native code] }",
-		"storageBuckets-[object StorageBucketManager]",
-		"mediaCapabilities-[object MediaCapabilities]",
-		"cookieEnabled-true",
-		"virtualKeyboard-[object VirtualKeyboard]",
-		"product-Gecko",
-		"presentation-[object Presentation]",
-		"onLine-true",
-		"mimeTypes-[object MimeTypeArray]",
-		"credentials-[object CredentialsContainer]",
-		"serviceWorker-[object ServiceWorkerContainer]",
-		"keyboard-[object Keyboard]",
-		"gpu-[object GPU]",
+		"registerProtocolHandler−function registerProtocolHandler() { [native code] }",
+		"storage−[object StorageManager]",
+		"locks−[object LockManager]",
+		"appCodeName−Mozilla",
+		"permissions−[object Permissions]",
+		"share−function share() { [native code] }",
+		"webdriver−false",
+		"managed−[object NavigatorManagedData]",
+		"canShare−function canShare() { [native code] }",
+		"vendor−Google Inc.",
+		"mediaDevices−[object MediaDevices]",
+		"vibrate−function vibrate() { [native code] }",
+		"storageBuckets−[object StorageBucketManager]",
+		"mediaCapabilities−[object MediaCapabilities]",
+		"cookieEnabled−true",
+		"virtualKeyboard−[object VirtualKeyboard]",
+		"product−Gecko",
+		"presentation−[object Presentation]",
+		"onLine−true",
+		"mimeTypes−[object MimeTypeArray]",
+		"credentials−[object CredentialsContainer]",
+		"serviceWorker−[object ServiceWorkerContainer]",
+		"keyboard−[object Keyboard]",
+		"gpu−[object GPU]",
 		"doNotTrack",
-		"serial-[object Serial]",
-		"pdfViewerEnabled-true",
-		"language-zh-CN",
-		"geolocation-[object Geolocation]",
-		"userAgentData-[object NavigatorUAData]",
-		"getUserMedia-function getUserMedia() { [native code] }",
-		"sendBeacon-function sendBeacon() { [native code] }",
-		"hardwareConcurrency-32",
-		"windowControlsOverlay-[object WindowControlsOverlay]",
+		"serial−[object Serial]",
+		"pdfViewerEnabled−true",
+		"language−zh-CN",
+		"geolocation−[object Geolocation]",
+		"userAgentData−[object NavigatorUAData]",
+		"getUserMedia−function getUserMedia() { [native code] }",
+		"sendBeacon−function sendBeacon() { [native code] }",
+		"hardwareConcurrency−32",
+		"windowControlsOverlay−[object WindowControlsOverlay]",
 	}
 	windowKeys := []string{
 		"0", "window", "self", "document", "name", "location", "customElements", "history", "navigation",
@@ -105,7 +107,8 @@ func buildPOWConfig(userAgent string, scriptSources []string, dataBuild string) 
 	documentKeys := []string{"_reactListeningo743lnnpvdg", "location"}
 	cores := []int{8, 16, 24, 32}
 	now := time.Now().In(time.FixedZone("EST", -5*3600)).Format("Mon Jan 02 2006 15:04:05") + " GMT-0500 (Eastern Standard Time)"
-	perfNow := float64(time.Now().UnixNano()) / 1e6
+	perfNow := float64(time.Since(powProcessStart).Nanoseconds()) / 1e6
+	timeOrigin := float64(time.Now().UnixNano())/1e6 - perfNow
 	return []any{
 		randomChoiceInt([]int{3000, 4000, 5000}),
 		now,
@@ -124,7 +127,7 @@ func buildPOWConfig(userAgent string, scriptSources []string, dataBuild string) 
 		newUUID(),
 		"",
 		randomChoiceInt(cores),
-		float64(time.Now().UnixNano())/1e6 - perfNow,
+		timeOrigin,
 	}
 }
 

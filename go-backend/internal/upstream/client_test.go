@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -46,7 +47,7 @@ func TestListModels(t *testing.T) {
 	}
 }
 
-func TestDefaultFingerprintUsesChromeProfile(t *testing.T) {
+func TestDefaultFingerprintUsesEdgeProfile(t *testing.T) {
 	client := NewTestClient("https://example.test", "", nil, http.DefaultClient)
 	if client.fp["impersonate"] != defaultProfile {
 		t.Fatalf("impersonate = %q", client.fp["impersonate"])
@@ -57,12 +58,12 @@ func TestDefaultFingerprintUsesChromeProfile(t *testing.T) {
 	if client.fp["sec-ch-ua"] != defaultSecCHUA {
 		t.Fatalf("sec-ch-ua = %q", client.fp["sec-ch-ua"])
 	}
-	if client.fp["sec-ch-ua-full-version-list"] == "" {
-		t.Fatal("missing sec-ch-ua-full-version-list")
+	if !strings.Contains(client.fp["sec-ch-ua-full-version-list"], "Microsoft Edge") {
+		t.Fatalf("sec-ch-ua-full-version-list = %q", client.fp["sec-ch-ua-full-version-list"])
 	}
 }
 
-func TestEdgeFingerprintIsNormalizedForGoClient(t *testing.T) {
+func TestEdgeFingerprintIsPreservedForGoClient(t *testing.T) {
 	lookup := fakeAccountLookup{account: map[string]any{
 		"fp": map[string]any{
 			"impersonate": "edge101",
@@ -71,39 +72,29 @@ func TestEdgeFingerprintIsNormalizedForGoClient(t *testing.T) {
 		},
 	}}
 	client := NewTestClient("https://example.test", "token", lookup, http.DefaultClient)
-	if client.fp["impersonate"] != defaultProfile {
+	if client.fp["impersonate"] != "edge101" {
 		t.Fatalf("impersonate = %q", client.fp["impersonate"])
 	}
-	if client.fp["user-agent"] != defaultUserAgent {
+	if !strings.Contains(client.fp["user-agent"], "Edg/143.0.0.0") {
 		t.Fatalf("user-agent = %q", client.fp["user-agent"])
 	}
-	if client.fp["sec-ch-ua"] != defaultSecCHUA {
+	if !strings.Contains(client.fp["sec-ch-ua"], "Microsoft Edge") {
 		t.Fatalf("sec-ch-ua = %q", client.fp["sec-ch-ua"])
 	}
 }
 
-func TestBootstrapCloudflareChallengeFallsBackToDefaultPOW(t *testing.T) {
+func TestBootstrapCloudflareChallengeFailsBeforeChatRequirements(t *testing.T) {
+	var requirementsHits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`<!doctype html><html><body>Cloudflare cf_chl challenge-platform</body></html>`))
 		case "/backend-api/sentinel/chat-requirements":
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatal(err)
-			}
-			if body["p"] == "" {
-				t.Fatalf("missing fallback p body: %#v", body)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"token": "requirements-token"})
+			requirementsHits.Add(1)
+			t.Fatal("chat requirements should not be called after Cloudflare bootstrap challenge")
 		case "/backend-api/conversation":
-			if r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Token") != "requirements-token" {
-				t.Fatalf("requirements header = %q", r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Token"))
-			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("data: {\"message\":{\"author\":{\"role\":\"assistant\"},\"content\":{\"parts\":[\"hello\"]}}}\n\n"))
-			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			t.Fatal("conversation should not be called after Cloudflare bootstrap challenge")
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.String())
 		}
@@ -116,14 +107,15 @@ func TestBootstrapCloudflareChallengeFallsBackToDefaultPOW(t *testing.T) {
 	for payload := range payloads {
 		got = append(got, payload)
 	}
-	if err := <-errCh; err != nil {
-		t.Fatal(err)
+	err := <-errCh
+	if err == nil || !strings.Contains(err.Error(), "bootstrap failed: HTTP 403") {
+		t.Fatalf("err = %v", err)
 	}
-	if len(got) != 2 || got[1] != "[DONE]" {
+	if len(got) != 0 {
 		t.Fatalf("payloads = %#v", got)
 	}
-	if len(client.powSources) != 1 || client.powSources[0] != defaultPOWScript {
-		t.Fatalf("powSources = %#v", client.powSources)
+	if requirementsHits.Load() != 0 {
+		t.Fatalf("requirements hits = %d", requirementsHits.Load())
 	}
 }
 

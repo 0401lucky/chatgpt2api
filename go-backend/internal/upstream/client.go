@@ -21,9 +21,9 @@ const (
 	defaultBaseURL           = "https://chatgpt.com"
 	defaultClientVersion     = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 	defaultClientBuildNumber = "5955942"
-	defaultUserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
-	defaultSecCHUA           = `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`
-	defaultProfile           = "chrome/windows"
+	defaultUserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
+	defaultSecCHUA           = `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`
+	defaultProfile           = "edge101"
 	platformOAuthClientID    = "app_2SKx67EdpoN0G6j64rFvigXD"
 	defaultOAuthTokenURL     = "https://auth.openai.com/oauth/token"
 	accountRefreshTimeout    = 20 * time.Second
@@ -258,11 +258,10 @@ func (c *Client) bootstrap(ctx context.Context) error {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if isCloudflareChallengeBody(body) {
-			c.setDefaultPOWResources()
-			return nil
-		}
 		return upstreamHTTPError("bootstrap", resp.StatusCode, body)
+	}
+	if isCloudflareChallengeBody(body) {
+		return fmt.Errorf("bootstrap failed: %s", summarizeBody(body))
 	}
 	c.powSources, c.powDataBuild = parsePOWResources(string(body))
 	if len(c.powSources) == 0 {
@@ -323,7 +322,6 @@ func (c *Client) buildFingerprint() map[string]string {
 			fp[key] = value
 		}
 	}
-	normalizeUnsupportedGoProfile(fp)
 	setDefault(fp, "user-agent", defaultUserAgent)
 	setDefault(fp, "impersonate", defaultProfile)
 	setDefault(fp, "oai-device-id", newUUID())
@@ -334,30 +332,18 @@ func (c *Client) buildFingerprint() map[string]string {
 }
 
 func (c *Client) applyBrowserFingerprint() {
-	setDefault(c.fp, "sec-ch-ua", browserMetadataFromUserAgent(c.fp["user-agent"]).secCHUA)
+	metadata := browserMetadataFromUserAgent(c.fp["user-agent"])
+	setDefault(c.fp, "sec-ch-ua", metadata.secCHUA)
 	setDefault(c.fp, "sec-ch-ua-arch", `"x86"`)
 	setDefault(c.fp, "sec-ch-ua-bitness", `"64"`)
-	setDefault(c.fp, "sec-ch-ua-full-version", `"145.0.0.0"`)
-	setDefault(c.fp, "sec-ch-ua-full-version-list", `"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.0.0", "Chromium";v="145.0.0.0"`)
+	setDefault(c.fp, "sec-ch-ua-full-version", metadata.secCHUAFullVersion)
+	setDefault(c.fp, "sec-ch-ua-full-version-list", metadata.secCHUAFullVersionList)
 	setDefault(c.fp, "sec-ch-ua-platform-version", `"19.0.0"`)
 }
 
 func (c *Client) setDefaultPOWResources() {
 	c.powSources = []string{defaultPOWScript}
 	c.powDataBuild = ""
-}
-
-func normalizeUnsupportedGoProfile(fp map[string]string) {
-	profile := strings.ToLower(strings.TrimSpace(fp["impersonate"]))
-	userAgent := fp["user-agent"]
-	isEdgeProfile := strings.Contains(profile, "edge")
-	isEdgeUA := strings.Contains(userAgent, " Edg/") || strings.Contains(userAgent, " EdgA/") || strings.Contains(userAgent, " EdgiOS/")
-	if !isEdgeProfile && !isEdgeUA {
-		return
-	}
-	fp["impersonate"] = defaultProfile
-	fp["user-agent"] = defaultUserAgent
-	fp["sec-ch-ua"] = defaultSecCHUA
 }
 
 func (c *Client) headers(route string, extra map[string]string) map[string]string {
@@ -415,7 +401,9 @@ func (c *Client) bootstrapHeaders() map[string]string {
 }
 
 type browserHeaderMetadata struct {
-	secCHUA string
+	secCHUA                string
+	secCHUAFullVersion     string
+	secCHUAFullVersionList string
 }
 
 func browserMetadataFromUserAgent(userAgent string) browserHeaderMetadata {
@@ -424,13 +412,26 @@ func browserMetadataFromUserAgent(userAgent string) browserHeaderMetadata {
 	if edgeVersion != "" {
 		edgeMajor := majorVersion(edgeVersion)
 		chromiumMajor := majorVersion(firstNonEmpty(chromeVersion, edgeVersion))
-		return browserHeaderMetadata{secCHUA: fmt.Sprintf(`"Microsoft Edge";v="%s", "Chromium";v="%s", "Not A(Brand";v="24"`, edgeMajor, chromiumMajor)}
+		return browserHeaderMetadata{
+			secCHUA:                fmt.Sprintf(`"Microsoft Edge";v="%s", "Chromium";v="%s", "Not A(Brand";v="24"`, edgeMajor, chromiumMajor),
+			secCHUAFullVersion:     `"143.0.3650.96"`,
+			secCHUAFullVersionList: `"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"`,
+		}
 	}
 	if chromeVersion != "" {
 		major := majorVersion(chromeVersion)
-		return browserHeaderMetadata{secCHUA: fmt.Sprintf(`"Not:A-Brand";v="99", "Google Chrome";v="%s", "Chromium";v="%s"`, major, major)}
+		fullVersion := quoteVersion(chromeVersion)
+		return browserHeaderMetadata{
+			secCHUA:                fmt.Sprintf(`"Not:A-Brand";v="99", "Google Chrome";v="%s", "Chromium";v="%s"`, major, major),
+			secCHUAFullVersion:     fullVersion,
+			secCHUAFullVersionList: fmt.Sprintf(`"Not:A-Brand";v="99.0.0.0", "Google Chrome";v=%s, "Chromium";v=%s`, fullVersion, fullVersion),
+		}
 	}
-	return browserHeaderMetadata{secCHUA: defaultSecCHUA}
+	return browserHeaderMetadata{
+		secCHUA:                defaultSecCHUA,
+		secCHUAFullVersion:     `"143.0.3650.96"`,
+		secCHUAFullVersionList: `"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"`,
+	}
 }
 
 func detectAccountType(accessToken string, payloads ...map[string]any) string {
@@ -629,6 +630,13 @@ func majorVersion(version string) string {
 		return before
 	}
 	return version
+}
+
+func quoteVersion(version string) string {
+	if strings.TrimSpace(version) == "" {
+		return `""`
+	}
+	return `"` + version + `"`
 }
 
 func newUUID() string {

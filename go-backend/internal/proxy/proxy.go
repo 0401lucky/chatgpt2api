@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -57,7 +58,64 @@ func applyBrowserProfile(builder *surf.Builder, profile string) *surf.Builder {
 	if strings.Contains(normalized, "firefox") || strings.Contains(normalized, "ff") {
 		return impersonate.Firefox()
 	}
+	if strings.Contains(normalized, "edge") {
+		return applyEdgeProfile(builder, impersonate, normalized)
+	}
 	return impersonate.Chrome()
+}
+
+type edgeHeaderSnapshotKey struct{}
+
+var edgeBrowserHeaders = []string{
+	"User-Agent",
+	"Accept-Language",
+	"Sec-Ch-Ua",
+	"Sec-Ch-Ua-Arch",
+	"Sec-Ch-Ua-Bitness",
+	"Sec-Ch-Ua-Full-Version",
+	"Sec-Ch-Ua-Full-Version-List",
+	"Sec-Ch-Ua-Mobile",
+	"Sec-Ch-Ua-Model",
+	"Sec-Ch-Ua-Platform",
+	"Sec-Ch-Ua-Platform-Version",
+}
+
+func applyEdgeProfile(builder *surf.Builder, impersonate *surf.Impersonate, profile string) *surf.Builder {
+	builder = builder.With(captureEdgeBrowserHeaders, -1)
+	builder = impersonate.Chrome()
+	builder = builder.With(restoreEdgeBrowserHeaders, 1)
+	if strings.Contains(profile, "85") {
+		return builder.JA().Edge85()
+	}
+	return builder.JA().Edge106()
+}
+
+func captureEdgeBrowserHeaders(req *surf.Request) error {
+	headers := req.GetRequest().Header
+	snapshot := make(map[string]string, len(edgeBrowserHeaders))
+	for _, key := range edgeBrowserHeaders {
+		if value := headers.Get(key); value != "" {
+			snapshot[key] = value
+		}
+	}
+	req.WithContext(context.WithValue(req.GetRequest().Context(), edgeHeaderSnapshotKey{}, snapshot))
+	return nil
+}
+
+func restoreEdgeBrowserHeaders(req *surf.Request) error {
+	snapshot, _ := req.GetRequest().Context().Value(edgeHeaderSnapshotKey{}).(map[string]string)
+	if snapshot == nil {
+		return nil
+	}
+	headers := req.GetRequest().Header
+	for _, key := range edgeBrowserHeaders {
+		if value, ok := snapshot[key]; ok {
+			headers.Set(key, value)
+			continue
+		}
+		headers.Del(key)
+	}
+	return nil
 }
 
 type errorTransport struct {

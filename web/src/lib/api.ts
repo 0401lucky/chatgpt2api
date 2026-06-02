@@ -63,10 +63,29 @@ type AccountMutationResponse = {
   errors?: Array<{ account_id: string; token_preview: string; error: string }>;
 };
 
-type AccountRefreshResponse = {
-  items: Account[];
+export type AccountRefreshError = {
+  account_id: string;
+  token_preview: string;
+  error: string;
+};
+
+export type AccountRefreshJob = {
+  id: string;
+  status: "queued" | "running" | "success" | "error";
+  requested: number;
+  completed: number;
   refreshed: number;
-  errors: Array<{ account_id: string; token_preview: string; error: string }>;
+  failed: number;
+  errors: AccountRefreshError[];
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string | null;
+};
+
+export type AccountRefreshResponse = {
+  items: Account[];
+  job: AccountRefreshJob;
 };
 
 type AccountUpdateResponse = {
@@ -336,8 +355,12 @@ export async function deleteAccounts(accountIds: string[]) {
 export async function refreshAccounts(accountIds: string[]) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
-    body: { account_ids: accountIds },
+    body: { account_ids: accountIds, async: true },
   });
+}
+
+export async function fetchAccountRefreshJob(jobId: string) {
+  return httpRequest<AccountRefreshResponse>(`/api/accounts/refresh/jobs/${encodeURIComponent(jobId)}`);
 }
 
 export async function updateAccount(

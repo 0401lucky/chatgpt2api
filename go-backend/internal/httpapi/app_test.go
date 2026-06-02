@@ -152,6 +152,63 @@ func TestAccountRefreshWritesSystemLog(t *testing.T) {
 	}
 }
 
+func TestAccountRefreshAsyncJobPollsUntilComplete(t *testing.T) {
+	app, accounts := newTestApp(t)
+	refresher := &fakeAccountRefresher{
+		info: map[string]any{"quota": 42, "type": "Team", "status": "正常", "email": "async@example.test"},
+	}
+	accounts.SetRemoteRefresher(refresher)
+	id := accounts.ListAccounts()[0]["id"].(string)
+
+	submit := httptest.NewRecorder()
+	submitReq := httptest.NewRequest(http.MethodPost, "/api/accounts/refresh", bytes.NewReader([]byte(`{"account_ids":["`+id+`"],"async":true}`)))
+	submitReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(submit, submitReq)
+	if submit.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d body=%s", submit.Code, submit.Body.String())
+	}
+	var submitBody map[string]any
+	if err := json.Unmarshal(submit.Body.Bytes(), &submitBody); err != nil {
+		t.Fatal(err)
+	}
+	job := submitBody["job"].(map[string]any)
+	jobID := job["id"].(string)
+	if jobID == "" || job["requested"] != float64(1) {
+		t.Fatalf("job = %#v", job)
+	}
+
+	var pollBody map[string]any
+	for i := 0; i < 20; i++ {
+		poll := httptest.NewRecorder()
+		pollReq := httptest.NewRequest(http.MethodGet, "/api/accounts/refresh/jobs/"+jobID, nil)
+		pollReq.Header.Set("Authorization", "Bearer admin-key")
+		app.ServeHTTP(poll, pollReq)
+		if poll.Code != http.StatusOK {
+			t.Fatalf("poll status = %d body=%s", poll.Code, poll.Body.String())
+		}
+		if err := json.Unmarshal(poll.Body.Bytes(), &pollBody); err != nil {
+			t.Fatal(err)
+		}
+		current := pollBody["job"].(map[string]any)
+		if current["status"] == account.RefreshJobSuccess {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	current := pollBody["job"].(map[string]any)
+	if current["status"] != account.RefreshJobSuccess {
+		t.Fatalf("job did not finish: %#v", current)
+	}
+	if current["completed"] != float64(1) || current["refreshed"] != float64(1) || current["failed"] != float64(0) {
+		t.Fatalf("job counters = %#v", current)
+	}
+	items := pollBody["items"].([]any)
+	item := items[0].(map[string]any)
+	if item["quota"] != float64(42) || item["type"] != "Team" || item["email"] != "async@example.test" {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
 func TestFetchRemoteInfoDoesNotBootstrapHomepage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

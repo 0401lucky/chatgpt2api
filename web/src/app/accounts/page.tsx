@@ -40,10 +40,12 @@ import {
 } from "@/components/ui/select";
 import {
   deleteAccounts,
+  fetchAccountRefreshJob,
   fetchAccounts,
   refreshAccounts,
   updateAccount,
   type Account,
+  type AccountRefreshJob,
   type AccountStatus,
   type AccountType,
 } from "@/lib/api";
@@ -90,6 +92,13 @@ const metricCards = [
   { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
   { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
 ] as const;
+
+const refreshJobStatusLabel: Record<AccountRefreshJob["status"], string> = {
+  queued: "排队中",
+  running: "刷新中",
+  success: "刷新完成",
+  error: "刷新失败",
+};
 
 function isUnlimitedImageQuotaAccount(account: Account) {
   return account.type === "pro" || account.type === "prolite";
@@ -165,6 +174,25 @@ function normalizeAccounts(items: Account[]): Account[] {
   }));
 }
 
+function isRefreshJobFinished(job: AccountRefreshJob) {
+  return job.status === "success" || job.status === "error";
+}
+
+function getRefreshJobProgress(job: AccountRefreshJob) {
+  const requested = Math.max(0, job.requested);
+  const completed = Math.max(0, Math.min(job.completed, requested || job.completed));
+  const percent = requested > 0 ? Math.min(100, Math.round((completed / requested) * 100)) : 0;
+
+  return { requested, completed, percent };
+}
+
+function formatRefreshJobToast(job: AccountRefreshJob) {
+  const firstError = job.error || job.errors[0]?.error;
+  const suffix = firstError ? `，首个错误：${firstError}` : "";
+
+  return `刷新成功 ${job.refreshed} 个，失败 ${job.failed} 个${suffix}`;
+}
+
 function maskToken(token?: string) {
   if (!token) return "—";
   if (token.length <= 18) return token;
@@ -196,6 +224,7 @@ function displayAccountType(account: Account) {
 
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
+  const finishedRefreshJobIdRef = useRef<string | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -209,12 +238,14 @@ function AccountsPageContent() {
   const [editQuota, setEditQuota] = useState("0");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshJob, setRefreshJob] = useState<AccountRefreshJob | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
 
   const loadAccounts = async (silent = false) => {
     if (!silent) {
       setIsLoading(true);
+      setRefreshJob(null);
     }
     try {
       const data = await fetchAccounts();
@@ -237,6 +268,80 @@ function AccountsPageContent() {
     didLoadRef.current = true;
     void loadAccounts();
   }, []);
+
+  const refreshJobId = refreshJob?.id ?? null;
+  const refreshJobProgress = refreshJob ? getRefreshJobProgress(refreshJob) : null;
+
+  useEffect(() => {
+    if (!refreshJobId) {
+      return;
+    }
+
+    let disposed = false;
+    let requestInFlight = false;
+
+    const announceFinishedJob = (job: AccountRefreshJob) => {
+      if (finishedRefreshJobIdRef.current === job.id) {
+        return;
+      }
+      finishedRefreshJobIdRef.current = job.id;
+
+      const message = formatRefreshJobToast(job);
+      if (job.status === "error" || job.failed > 0) {
+        toast.error(message);
+        return;
+      }
+      toast.success(message);
+    };
+
+    const pollRefreshJob = async () => {
+      if (requestInFlight) {
+        return;
+      }
+      requestInFlight = true;
+
+      try {
+        const data = await fetchAccountRefreshJob(refreshJobId);
+        if (disposed) {
+          return;
+        }
+
+        const normalizedItems = normalizeAccounts(data.items);
+        const validIds = new Set(normalizedItems.map((item) => item.id));
+        setAccounts(normalizedItems);
+        setSelectedIds((prev) => prev.filter((id) => validIds.has(id)));
+        setRefreshJob(data.job);
+
+        if (isRefreshJobFinished(data.job)) {
+          setIsRefreshing(false);
+          announceFinishedJob(data.job);
+          stopPolling();
+        }
+      } catch (error) {
+        if (disposed) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : "刷新任务轮询失败";
+        setIsRefreshing(false);
+        setRefreshJob(null);
+        toast.error(message);
+        stopPolling();
+      } finally {
+        requestInFlight = false;
+      }
+    };
+
+    const intervalId = window.setInterval(() => void pollRefreshJob(), 1500);
+
+    function stopPolling() {
+      disposed = true;
+      window.clearInterval(intervalId);
+    }
+
+    void pollRefreshJob();
+
+    return stopPolling;
+  }, [refreshJobId]);
 
   const filteredAccounts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -312,23 +417,21 @@ function AccountsPageContent() {
     }
 
     setIsRefreshing(true);
+    setRefreshJob(null);
+    finishedRefreshJobIdRef.current = null;
     try {
       const data = await refreshAccounts(accountIds);
-      setAccounts(normalizeAccounts(data.items));
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
-      if (data.errors.length > 0) {
-        const firstError = data.errors[0]?.error;
-        toast.error(
-          `刷新成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
-        );
-      } else {
-        toast.success(`刷新成功 ${data.refreshed} 个账户`);
-      }
+      const normalizedItems = normalizeAccounts(data.items);
+      const validIds = new Set(normalizedItems.map((item) => item.id));
+      setAccounts(normalizedItems);
+      setSelectedIds((prev) => prev.filter((id) => validIds.has(id)));
+      setRefreshJob(data.job);
+      toast.success(`已提交后台刷新任务，共 ${data.job.requested} 个账号`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "刷新账户失败";
-      toast.error(message);
-    } finally {
       setIsRefreshing(false);
+      setRefreshJob(null);
+      toast.error(message);
     }
   };
 
@@ -568,6 +671,42 @@ function AccountsPageContent() {
             </Select>
           </div>
         </div>
+
+        {refreshJob && refreshJobProgress ? (
+          <div className="rounded-xl border border-stone-200 bg-white/85 px-4 py-3 shadow-sm">
+            <div className="flex flex-col gap-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap items-center gap-2 text-stone-600">
+                {isRefreshJobFinished(refreshJob) ? (
+                  refreshJob.status === "success" ? (
+                    <CheckCircle2 className="size-4 text-emerald-600" />
+                  ) : (
+                    <CircleAlert className="size-4 text-rose-500" />
+                  )
+                ) : (
+                  <LoaderCircle className="size-4 animate-spin text-stone-500" />
+                )}
+                <span className="font-medium text-stone-800">{refreshJobStatusLabel[refreshJob.status]}</span>
+                <span className="text-stone-400">·</span>
+                <span>
+                  {refreshJobProgress.completed}/{refreshJobProgress.requested}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 text-xs font-medium text-stone-500">
+                <span className="text-emerald-600">成功 {refreshJob.refreshed}</span>
+                <span className="text-rose-500">失败 {refreshJob.failed}</span>
+              </div>
+            </div>
+            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-stone-100">
+              <div
+                className={cn(
+                  "h-full rounded-full transition-all duration-300",
+                  refreshJob.status === "error" ? "bg-rose-500" : "bg-stone-900",
+                )}
+                style={{ width: `${refreshJobProgress.percent}%` }}
+              />
+            </div>
+          </div>
+        ) : null}
 
         {isLoading && accounts.length === 0 ? (
           <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">

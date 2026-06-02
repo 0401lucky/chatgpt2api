@@ -92,6 +92,7 @@ func (a *App) routes() {
 	a.mux.HandleFunc("/api/proxy/test", a.handleProxyTest)
 	a.mux.HandleFunc("/api/accounts", a.handleAccounts)
 	a.mux.HandleFunc("/api/accounts/refresh", a.handleAccountsRefresh)
+	a.mux.HandleFunc("/api/accounts/refresh/jobs/", a.handleAccountRefreshJob)
 	a.mux.HandleFunc("/api/accounts/update", a.handleAccountsUpdate)
 	a.mux.HandleFunc("/api/auth/users/", a.handleUserKeyItem)
 	a.mux.HandleFunc("/api/auth/users", a.handleUserKeys)
@@ -249,6 +250,7 @@ func (a *App) handleAccountsRefresh(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AccessTokens []string `json:"access_tokens"`
 		AccountIDs   []string `json:"account_ids"`
+		Async        bool     `json:"async"`
 	}
 	if !decodeJSONBody(w, r, &body) {
 		return
@@ -269,6 +271,19 @@ func (a *App) handleAccountsRefresh(w http.ResponseWriter, r *http.Request) {
 		writeDetailError(w, http.StatusBadRequest, "access_tokens or account_ids is required")
 		return
 	}
+	if body.Async {
+		job, err := a.accounts.StartRefreshJob(tokens)
+		if err != nil {
+			writeDetailError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.logEvent("account", "提交账号刷新任务", map[string]any{
+			"requested": len(tokens),
+			"job_id":    job["id"],
+		})
+		writeJSON(w, http.StatusAccepted, map[string]any{"job": job, "items": a.accounts.ListAccounts()})
+		return
+	}
 	result := a.accounts.RefreshAccounts(r.Context(), tokens)
 	a.logEvent("account", "刷新账号", map[string]any{
 		"requested": len(tokens),
@@ -276,6 +291,27 @@ func (a *App) handleAccountsRefresh(w http.ResponseWriter, r *http.Request) {
 		"errors":    len(anySlice(result["errors"])),
 	})
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *App) handleAccountRefreshJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+	if _, ok := a.requireAdmin(w, r); !ok {
+		return
+	}
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/accounts/refresh/jobs/"), "/")
+	if id == "" {
+		writeDetailError(w, http.StatusBadRequest, "job id is required")
+		return
+	}
+	job := a.accounts.GetRefreshJob(id)
+	if job == nil {
+		writeDetailError(w, http.StatusNotFound, "refresh job not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": job, "items": a.accounts.ListAccounts()})
 }
 
 func (a *App) handleAccountsUpdate(w http.ResponseWriter, r *http.Request) {

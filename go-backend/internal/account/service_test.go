@@ -247,6 +247,43 @@ func TestRefreshAccountsDoesNotMarkTransientErrorAbnormal(t *testing.T) {
 	}
 }
 
+func TestStartRefreshJobReturnsProgressAndCompletes(t *testing.T) {
+	service := newTestService(t, 3)
+	const token = "secret-token-alpha-1234567890"
+	service.AddAccounts([]string{token})
+	service.SetRemoteRefresher(&fakeRemoteRefresher{
+		info: map[string]any{"quota": 9, "status": "正常", "type": "Team", "email": "job@example.test"},
+	})
+
+	job, err := service.StartRefreshJob([]string{token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := job["id"].(string)
+	if id == "" || job["requested"].(int) != 1 {
+		t.Fatalf("job = %#v", job)
+	}
+
+	var current map[string]any
+	for i := 0; i < 20; i++ {
+		current = service.GetRefreshJob(id)
+		if current != nil && current["status"] == RefreshJobSuccess {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if current == nil || current["status"] != RefreshJobSuccess {
+		t.Fatalf("job did not finish: %#v", current)
+	}
+	if current["completed"].(int) != 1 || current["refreshed"].(int) != 1 || current["failed"].(int) != 0 {
+		t.Fatalf("job counters = %#v", current)
+	}
+	items := service.ListAccounts()
+	if items[0]["quota"] != 9 || items[0]["type"] != "Team" || items[0]["email"] != "job@example.test" {
+		t.Fatalf("account was not refreshed: %#v", items[0])
+	}
+}
+
 func newTestService(t *testing.T, imageConcurrency int) *Service {
 	t.Helper()
 	service, err := NewService(storage.NewJSONStore(t.TempDir()), imageConcurrency)

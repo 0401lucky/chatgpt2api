@@ -24,7 +24,17 @@ type OAuthTokenRefresher interface {
 	RefreshAccessToken(ctx context.Context, refreshToken string) (map[string]any, error)
 }
 
-const maxRefreshWorkers = 10
+const (
+	maxRefreshWorkers = 10
+	refreshSaveEvery  = 25
+)
+
+const (
+	RefreshJobQueued  = "queued"
+	RefreshJobRunning = "running"
+	RefreshJobSuccess = "success"
+	RefreshJobError   = "error"
+)
 
 type Service struct {
 	mu                      sync.Mutex
@@ -34,6 +44,21 @@ type Service struct {
 	index                   int
 	imageReservations       map[string]int
 	imageAccountConcurrency int
+	refreshJobs             map[string]*RefreshJob
+}
+
+type RefreshJob struct {
+	ID         string
+	Status     string
+	Requested  int
+	Completed  int
+	Refreshed  int
+	Failed     int
+	Errors     []map[string]string
+	Error      string
+	CreatedAt  string
+	UpdatedAt  string
+	FinishedAt string
 }
 
 func NewService(store Store, imageAccountConcurrency int) (*Service, error) {
@@ -55,6 +80,7 @@ func NewService(store Store, imageAccountConcurrency int) (*Service, error) {
 		items:                   normalized,
 		imageReservations:       map[string]int{},
 		imageAccountConcurrency: imageAccountConcurrency,
+		refreshJobs:             map[string]*RefreshJob{},
 	}, nil
 }
 
@@ -215,6 +241,10 @@ func (s *Service) UpdateAccount(accessToken string, updates map[string]any) map[
 }
 
 func (s *Service) updateAccountFields(accessToken string, updates map[string]any, manualUpdate bool) map[string]any {
+	return s.updateAccountFieldsWithSave(accessToken, updates, manualUpdate, true)
+}
+
+func (s *Service) updateAccountFieldsWithSave(accessToken string, updates map[string]any, manualUpdate, save bool) map[string]any {
 	accessToken = clean(accessToken)
 	if accessToken == "" {
 		return nil
@@ -241,7 +271,9 @@ func (s *Service) updateAccountFields(accessToken string, updates map[string]any
 		return nil
 	}
 	s.items[index] = normalized
-	_ = s.saveLocked()
+	if save {
+		_ = s.saveLocked()
+	}
 	return publicAccount(normalized)
 }
 
@@ -261,13 +293,99 @@ func (s *Service) RefreshAccounts(ctx context.Context, tokens []string) map[stri
 	s.mu.Lock()
 	refresher := s.refresher
 	s.mu.Unlock()
+	refreshed, errorsOut := s.refreshCleanedAccounts(ctx, cleaned, refresher, nil)
+	return map[string]any{"refreshed": refreshed, "errors": errorsOut, "items": s.ListAccounts()}
+}
+
+func (s *Service) StartRefreshJob(tokens []string) (map[string]any, error) {
+	cleaned := cleanTokens(tokens)
+	if len(cleaned) == 0 {
+		return nil, errors.New("access_tokens or account_ids is required")
+	}
+	now := nowString()
+	job := &RefreshJob{
+		ID:        newRefreshJobID(),
+		Status:    RefreshJobQueued,
+		Requested: len(cleaned),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.mu.Lock()
+	if s.refreshJobs == nil {
+		s.refreshJobs = map[string]*RefreshJob{}
+	}
+	for _, existing := range s.refreshJobs {
+		if existing == nil {
+			continue
+		}
+		if existing.Status == RefreshJobQueued || existing.Status == RefreshJobRunning {
+			public := publicRefreshJob(existing)
+			s.mu.Unlock()
+			return public, nil
+		}
+	}
+	s.cleanupRefreshJobsLocked()
+	s.refreshJobs[job.ID] = job
+	public := publicRefreshJob(job)
+	s.mu.Unlock()
+
+	go s.runRefreshJob(job.ID, cleaned)
+	return public, nil
+}
+
+func (s *Service) GetRefreshJob(id string) map[string]any {
+	id = clean(id)
+	if id == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.refreshJobs[id]
+	if job == nil {
+		return nil
+	}
+	return publicRefreshJob(job)
+}
+
+func (s *Service) runRefreshJob(id string, cleaned []string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.updateRefreshJob(id, map[string]any{
+				"status":      RefreshJobError,
+				"error":       fmt.Sprintf("refresh job panic: %v", recovered),
+				"finished_at": nowString(),
+			})
+		}
+	}()
+	s.updateRefreshJob(id, map[string]any{"status": RefreshJobRunning})
+	s.mu.Lock()
+	refresher := s.refresher
+	s.mu.Unlock()
+	refreshed, errorsOut := s.refreshCleanedAccounts(context.Background(), cleaned, refresher, func(completed, refreshed int, errorItem map[string]string) {
+		s.recordRefreshJobProgress(id, completed, refreshed, errorItem)
+	})
+	s.updateRefreshJob(id, map[string]any{
+		"status":      RefreshJobSuccess,
+		"completed":   len(cleaned),
+		"refreshed":   refreshed,
+		"failed":      len(errorsOut),
+		"errors":      errorsOut,
+		"finished_at": nowString(),
+	})
+}
+
+func (s *Service) refreshCleanedAccounts(ctx context.Context, cleaned []string, refresher RemoteRefresher, onProgress func(completed, refreshed int, errorItem map[string]string)) (int, []map[string]string) {
 	refreshed := 0
 	errorsOut := []map[string]string{}
 	if refresher == nil {
 		for _, token := range cleaned {
-			errorsOut = append(errorsOut, publicError(token, "Go 后端账号远程刷新尚未实现，本阶段仅提供本地账号池能力"))
+			errorItem := publicError(token, "Go 后端账号远程刷新尚未实现，本阶段仅提供本地账号池能力")
+			errorsOut = append(errorsOut, errorItem)
+			if onProgress != nil {
+				onProgress(len(errorsOut), refreshed, errorItem)
+			}
 		}
-		return map[string]any{"refreshed": refreshed, "errors": errorsOut, "items": s.ListAccounts()}
+		return refreshed, errorsOut
 	}
 	workerCount := min(maxRefreshWorkers, len(cleaned))
 	jobs := make(chan string)
@@ -283,26 +401,60 @@ func (s *Service) RefreshAccounts(ctx context.Context, tokens []string) map[stri
 			}
 		}()
 	}
-	for _, token := range cleaned {
-		jobs <- token
-	}
-	close(jobs)
-	wg.Wait()
-	close(results)
+	go func() {
+		for _, token := range cleaned {
+			select {
+			case <-ctx.Done():
+				close(jobs)
+				return
+			case jobs <- token:
+			}
+		}
+		close(jobs)
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	completed := 0
+	dirtyUpdates := 0
 	for result := range results {
+		completed++
 		finalToken := firstNonEmpty(result.finalToken, result.originalToken)
+		var errorItem map[string]string
 		if result.err != nil {
 			if isInvalidTokenRefreshError(result.err) {
-				_ = s.updateAccountFields(finalToken, map[string]any{"status": "异常", "quota": 0}, false)
+				if s.updateAccountFieldsWithSave(finalToken, map[string]any{"status": "异常", "quota": 0}, false, false) != nil {
+					dirtyUpdates++
+				}
 			}
-			errorsOut = append(errorsOut, publicError(finalToken, safeError(finalToken, result.err.Error())))
+			errorItem = publicError(finalToken, safeError(finalToken, result.err.Error()))
+			errorsOut = append(errorsOut, errorItem)
+			if dirtyUpdates >= refreshSaveEvery {
+				s.saveAccounts()
+				dirtyUpdates = 0
+			}
+			if onProgress != nil {
+				onProgress(completed, refreshed, errorItem)
+			}
 			continue
 		}
-		if item := s.updateAccountFields(finalToken, result.remoteInfo, false); item != nil {
+		if item := s.updateAccountFieldsWithSave(finalToken, result.remoteInfo, false, false); item != nil {
 			refreshed++
+			dirtyUpdates++
+		}
+		if dirtyUpdates >= refreshSaveEvery {
+			s.saveAccounts()
+			dirtyUpdates = 0
+		}
+		if onProgress != nil {
+			onProgress(completed, refreshed, nil)
 		}
 	}
-	return map[string]any{"refreshed": refreshed, "errors": errorsOut, "items": s.ListAccounts()}
+	if dirtyUpdates > 0 {
+		s.saveAccounts()
+	}
+	return refreshed, errorsOut
 }
 
 type accountRefreshResult struct {
@@ -496,6 +648,84 @@ func (s *Service) findIndexLocked(accessToken string) int {
 	return -1
 }
 
+func (s *Service) updateRefreshJob(id string, updates map[string]any) {
+	id = clean(id)
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.refreshJobs[id]
+	if job == nil {
+		return
+	}
+	if status := clean(updates["status"]); status != "" {
+		job.Status = status
+	}
+	if completed, ok := updates["completed"].(int); ok {
+		job.Completed = completed
+	}
+	if refreshed, ok := updates["refreshed"].(int); ok {
+		job.Refreshed = refreshed
+	}
+	if failed, ok := updates["failed"].(int); ok {
+		job.Failed = failed
+	}
+	if errorsOut, ok := updates["errors"].([]map[string]string); ok {
+		job.Errors = append([]map[string]string(nil), errorsOut...)
+	}
+	if message := clean(updates["error"]); message != "" {
+		job.Error = message
+	}
+	if finishedAt := clean(updates["finished_at"]); finishedAt != "" {
+		job.FinishedAt = finishedAt
+	}
+	job.UpdatedAt = nowString()
+}
+
+func (s *Service) recordRefreshJobProgress(id string, completed, refreshed int, errorItem map[string]string) {
+	id = clean(id)
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.refreshJobs[id]
+	if job == nil {
+		return
+	}
+	job.Completed = completed
+	job.Refreshed = refreshed
+	if errorItem != nil {
+		job.Failed++
+		job.Errors = append(job.Errors, copyStringMap(errorItem))
+	}
+	job.UpdatedAt = nowString()
+}
+
+func (s *Service) cleanupRefreshJobsLocked() {
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for id, job := range s.refreshJobs {
+		if job == nil {
+			delete(s.refreshJobs, id)
+			continue
+		}
+		if job.Status == RefreshJobQueued || job.Status == RefreshJobRunning {
+			continue
+		}
+		updatedAt, err := time.ParseInLocation("2006-01-02 15:04:05", job.UpdatedAt, time.Local)
+		if err == nil && updatedAt.Before(cutoff) {
+			delete(s.refreshJobs, id)
+		}
+	}
+}
+
+func (s *Service) saveAccounts() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.saveLocked()
+}
+
 func (s *Service) saveLocked() error {
 	return s.store.SaveAccounts(s.items)
 }
@@ -573,6 +803,29 @@ func publicError(token, message string) map[string]string {
 	}
 }
 
+func publicRefreshJob(job *RefreshJob) map[string]any {
+	if job == nil {
+		return nil
+	}
+	errorsOut := make([]map[string]string, 0, len(job.Errors))
+	for _, item := range job.Errors {
+		errorsOut = append(errorsOut, copyStringMap(item))
+	}
+	return map[string]any{
+		"id":          job.ID,
+		"status":      firstNonEmpty(job.Status, RefreshJobError),
+		"requested":   job.Requested,
+		"completed":   job.Completed,
+		"refreshed":   job.Refreshed,
+		"failed":      job.Failed,
+		"errors":      errorsOut,
+		"error":       nullable(job.Error),
+		"created_at":  job.CreatedAt,
+		"updated_at":  job.UpdatedAt,
+		"finished_at": nullable(job.FinishedAt),
+	}
+}
+
 func AccountID(accessToken string) string {
 	sum := sha1.Sum([]byte(accessToken))
 	return hex.EncodeToString(sum[:])[:16]
@@ -583,6 +836,15 @@ func TokenPreview(accessToken string) string {
 		return accessToken
 	}
 	return accessToken[:16] + "..." + accessToken[len(accessToken)-8:]
+}
+
+func newRefreshJobID() string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("%d", time.Now().UnixNano())))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+func nowString() string {
+	return time.Now().Format("2006-01-02 15:04:05")
 }
 
 func cleanTokens(tokens []string) []string {
@@ -641,6 +903,14 @@ func isInvalidTokenRefreshError(err error) bool {
 
 func copyMap(item map[string]any) map[string]any {
 	out := make(map[string]any, len(item))
+	for key, value := range item {
+		out[key] = value
+	}
+	return out
+}
+
+func copyStringMap(item map[string]string) map[string]string {
+	out := make(map[string]string, len(item))
 	for key, value := range item {
 		out[key] = value
 	}

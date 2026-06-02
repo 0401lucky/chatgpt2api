@@ -24,6 +24,8 @@ type OAuthTokenRefresher interface {
 	RefreshAccessToken(ctx context.Context, refreshToken string) (map[string]any, error)
 }
 
+const maxRefreshWorkers = 10
+
 type Service struct {
 	mu                      sync.Mutex
 	store                   Store
@@ -267,20 +269,47 @@ func (s *Service) RefreshAccounts(ctx context.Context, tokens []string) map[stri
 		}
 		return map[string]any{"refreshed": refreshed, "errors": errorsOut, "items": s.ListAccounts()}
 	}
+	workerCount := min(maxRefreshWorkers, len(cleaned))
+	jobs := make(chan string)
+	results := make(chan accountRefreshResult, len(cleaned))
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for token := range jobs {
+				finalToken, remoteInfo, err := s.fetchWithOAuthRefresh(ctx, refresher, token)
+				results <- accountRefreshResult{originalToken: token, finalToken: finalToken, remoteInfo: remoteInfo, err: err}
+			}
+		}()
+	}
 	for _, token := range cleaned {
-		finalToken, remoteInfo, err := s.fetchWithOAuthRefresh(ctx, refresher, token)
-		if err != nil {
-			if isInvalidTokenRefreshError(err) {
+		jobs <- token
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+	for result := range results {
+		finalToken := firstNonEmpty(result.finalToken, result.originalToken)
+		if result.err != nil {
+			if isInvalidTokenRefreshError(result.err) {
 				_ = s.updateAccountFields(finalToken, map[string]any{"status": "异常", "quota": 0}, false)
 			}
-			errorsOut = append(errorsOut, publicError(finalToken, safeError(finalToken, err.Error())))
+			errorsOut = append(errorsOut, publicError(finalToken, safeError(finalToken, result.err.Error())))
 			continue
 		}
-		if item := s.updateAccountFields(finalToken, remoteInfo, false); item != nil {
+		if item := s.updateAccountFields(finalToken, result.remoteInfo, false); item != nil {
 			refreshed++
 		}
 	}
 	return map[string]any{"refreshed": refreshed, "errors": errorsOut, "items": s.ListAccounts()}
+}
+
+type accountRefreshResult struct {
+	originalToken string
+	finalToken    string
+	remoteInfo    map[string]any
+	err           error
 }
 
 func (s *Service) fetchWithOAuthRefresh(ctx context.Context, refresher RemoteRefresher, accessToken string) (string, map[string]any, error) {

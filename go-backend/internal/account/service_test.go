@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"chatgpt2api-go-backend/internal/storage"
 )
@@ -149,6 +151,56 @@ func TestRefreshAccountsRotatesTokenBeforeMarkingInvalid(t *testing.T) {
 	}
 }
 
+func TestRefreshAccountsRunsWithBoundedConcurrency(t *testing.T) {
+	service := newTestService(t, 3)
+	tokens := make([]string, 20)
+	for i := range tokens {
+		tokens[i] = fmt.Sprintf("secret-token-%02d-1234567890", i)
+	}
+	service.AddAccounts(tokens)
+
+	unblock := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(unblock) })
+	}
+	defer release()
+	refresher := &boundedConcurrencyRefresher{
+		started: make(chan struct{}, maxRefreshWorkers),
+		unblock: unblock,
+	}
+	service.SetRemoteRefresher(refresher)
+
+	resultCh := make(chan map[string]any, 1)
+	go func() {
+		resultCh <- service.RefreshAccounts(context.Background(), tokens)
+	}()
+
+	for i := 0; i < maxRefreshWorkers; i++ {
+		select {
+		case <-refresher.started:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for refresh worker %d", i+1)
+		}
+	}
+	if maxActive := refresher.maxActive(); maxActive != maxRefreshWorkers {
+		t.Fatalf("max active workers before release = %d, want %d", maxActive, maxRefreshWorkers)
+	}
+
+	release()
+	select {
+	case result := <-resultCh:
+		if result["refreshed"].(int) != len(tokens) {
+			t.Fatalf("refreshed = %#v", result["refreshed"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for refresh result")
+	}
+	if maxActive := refresher.maxActive(); maxActive > maxRefreshWorkers {
+		t.Fatalf("max active workers = %d, want <= %d", maxActive, maxRefreshWorkers)
+	}
+}
+
 func TestRefreshAccountsMarksInvalidWhenOAuthRefreshFails(t *testing.T) {
 	service := newTestService(t, 3)
 	const token = "secret-token-alpha-1234567890"
@@ -205,6 +257,7 @@ func newTestService(t *testing.T, imageConcurrency int) *Service {
 }
 
 type fakeRemoteRefresher struct {
+	mu           sync.Mutex
 	info         map[string]any
 	err          error
 	infoByToken  map[string]map[string]any
@@ -216,20 +269,70 @@ type fakeRemoteRefresher struct {
 }
 
 func (f *fakeRemoteRefresher) FetchRemoteInfo(_ context.Context, token string) (map[string]any, error) {
+	f.mu.Lock()
 	f.fetchCalls = append(f.fetchCalls, token)
-	if err := f.errByToken[token]; err != nil {
+	err := f.errByToken[token]
+	info := f.infoByToken[token]
+	defaultInfo := f.info
+	defaultErr := f.err
+	f.mu.Unlock()
+	if err != nil {
 		return nil, err
 	}
-	if info := f.infoByToken[token]; info != nil {
+	if info != nil {
 		return info, nil
 	}
-	return f.info, f.err
+	return defaultInfo, defaultErr
 }
 
 func (f *fakeRemoteRefresher) RefreshAccessToken(_ context.Context, refreshToken string) (map[string]any, error) {
+	f.mu.Lock()
 	f.refreshCalls = append(f.refreshCalls, refreshToken)
-	if f.refreshErr != nil {
-		return nil, f.refreshErr
+	refreshErr := f.refreshErr
+	newTokens := f.newTokens
+	f.mu.Unlock()
+	if refreshErr != nil {
+		return nil, refreshErr
 	}
-	return f.newTokens, nil
+	return newTokens, nil
+}
+
+type boundedConcurrencyRefresher struct {
+	mu      sync.Mutex
+	active  int
+	max     int
+	calls   int
+	started chan struct{}
+	unblock <-chan struct{}
+}
+
+func (f *boundedConcurrencyRefresher) FetchRemoteInfo(ctx context.Context, token string) (map[string]any, error) {
+	f.mu.Lock()
+	f.active++
+	f.calls++
+	if f.active > f.max {
+		f.max = f.active
+	}
+	callNumber := f.calls
+	f.mu.Unlock()
+	if callNumber <= maxRefreshWorkers {
+		f.started <- struct{}{}
+	}
+	defer func() {
+		f.mu.Lock()
+		f.active--
+		f.mu.Unlock()
+	}()
+	select {
+	case <-f.unblock:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return map[string]any{"quota": 1, "status": "正常", "type": "Free", "email": token + "@example.test"}, nil
+}
+
+func (f *boundedConcurrencyRefresher) maxActive() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.max
 }

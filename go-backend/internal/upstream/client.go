@@ -26,6 +26,7 @@ const (
 	defaultProfile           = "edge101"
 	platformOAuthClientID    = "app_2SKx67EdpoN0G6j64rFvigXD"
 	defaultOAuthTokenURL     = "https://auth.openai.com/oauth/token"
+	accountRefreshTimeout    = 20 * time.Second
 )
 
 type AccountLookup interface {
@@ -73,7 +74,11 @@ func (s *Service) NewClient(accessToken string) *Client {
 }
 
 func (s *Service) FetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, error) {
-	return s.NewClient(accessToken).FetchRemoteInfo(ctx)
+	client := s.NewClient(accessToken)
+	if client.HTTPClient != nil {
+		client.HTTPClient.Timeout = accountRefreshTimeout
+	}
+	return client.FetchRemoteInfo(ctx)
 }
 
 func (s *Service) RefreshAccessToken(ctx context.Context, refreshToken string) (map[string]any, error) {

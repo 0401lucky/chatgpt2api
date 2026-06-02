@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestListModels(t *testing.T) {
@@ -47,7 +48,7 @@ func TestListModels(t *testing.T) {
 	}
 }
 
-func TestDefaultFingerprintUsesEdgeProfile(t *testing.T) {
+func TestDefaultFingerprintUsesChromeProfile(t *testing.T) {
 	client := NewTestClient("https://example.test", "", nil, http.DefaultClient)
 	if client.fp["impersonate"] != defaultProfile {
 		t.Fatalf("impersonate = %q", client.fp["impersonate"])
@@ -58,12 +59,12 @@ func TestDefaultFingerprintUsesEdgeProfile(t *testing.T) {
 	if client.fp["sec-ch-ua"] != defaultSecCHUA {
 		t.Fatalf("sec-ch-ua = %q", client.fp["sec-ch-ua"])
 	}
-	if !strings.Contains(client.fp["sec-ch-ua-full-version-list"], "Microsoft Edge") {
+	if !strings.Contains(client.fp["sec-ch-ua-full-version-list"], "Google Chrome") {
 		t.Fatalf("sec-ch-ua-full-version-list = %q", client.fp["sec-ch-ua-full-version-list"])
 	}
 }
 
-func TestEdgeFingerprintIsPreservedForGoClient(t *testing.T) {
+func TestEdgeFingerprintIsNormalizedForGoClient(t *testing.T) {
 	lookup := fakeAccountLookup{account: map[string]any{
 		"fp": map[string]any{
 			"impersonate": "edge101",
@@ -72,29 +73,39 @@ func TestEdgeFingerprintIsPreservedForGoClient(t *testing.T) {
 		},
 	}}
 	client := NewTestClient("https://example.test", "token", lookup, http.DefaultClient)
-	if client.fp["impersonate"] != "edge101" {
+	if client.fp["impersonate"] != defaultProfile {
 		t.Fatalf("impersonate = %q", client.fp["impersonate"])
 	}
-	if !strings.Contains(client.fp["user-agent"], "Edg/143.0.0.0") {
+	if client.fp["user-agent"] != defaultUserAgent {
 		t.Fatalf("user-agent = %q", client.fp["user-agent"])
 	}
-	if !strings.Contains(client.fp["sec-ch-ua"], "Microsoft Edge") {
+	if client.fp["sec-ch-ua"] != defaultSecCHUA {
 		t.Fatalf("sec-ch-ua = %q", client.fp["sec-ch-ua"])
 	}
 }
 
-func TestBootstrapCloudflareChallengeFailsBeforeChatRequirements(t *testing.T) {
-	var requirementsHits atomic.Int32
+func TestBootstrapCloudflareChallengeFallsBackToDefaultPOW(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`<!doctype html><html><body>Cloudflare cf_chl challenge-platform</body></html>`))
 		case "/backend-api/sentinel/chat-requirements":
-			requirementsHits.Add(1)
-			t.Fatal("chat requirements should not be called after Cloudflare bootstrap challenge")
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["p"] == "" {
+				t.Fatalf("missing fallback p body: %#v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "requirements-token"})
 		case "/backend-api/conversation":
-			t.Fatal("conversation should not be called after Cloudflare bootstrap challenge")
+			if r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Token") != "requirements-token" {
+				t.Fatalf("requirements header = %q", r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Token"))
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"message\":{\"author\":{\"role\":\"assistant\"},\"content\":{\"parts\":[\"hello\"]}}}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.String())
 		}
@@ -107,15 +118,75 @@ func TestBootstrapCloudflareChallengeFailsBeforeChatRequirements(t *testing.T) {
 	for payload := range payloads {
 		got = append(got, payload)
 	}
-	err := <-errCh
-	if err == nil || !strings.Contains(err.Error(), "bootstrap failed: HTTP 403") {
-		t.Fatalf("err = %v", err)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
 	}
-	if len(got) != 0 {
+	if len(got) != 2 || got[1] != "[DONE]" {
 		t.Fatalf("payloads = %#v", got)
 	}
-	if requirementsHits.Load() != 0 {
+	if len(client.powSources) != 1 || client.powSources[0] != defaultPOWScript {
+		t.Fatalf("powSources = %#v", client.powSources)
+	}
+}
+
+func TestChatRequirementsCloudflareChallengeRetriesWithFreshSession(t *testing.T) {
+	var requirementsHits atomic.Int32
+	var factoryHits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html></html>"))
+		case "/backend-api/sentinel/chat-requirements":
+			hit := requirementsHits.Add(1)
+			if hit == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`<!doctype html><html><body>Cloudflare cf_chl challenge-platform</body></html>`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "requirements-token"})
+		case "/backend-api/conversation":
+			if r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Token") != "requirements-token" {
+				t.Fatalf("requirements header = %q", r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Token"))
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"message\":{\"author\":{\"role\":\"assistant\"},\"content\":{\"parts\":[\"hello\"]}}}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewTestClient(server.URL, "test-token", nil, server.Client())
+	firstDeviceID := client.deviceID
+	client.NewHTTPClient = func(profile string, timeout time.Duration) *http.Client {
+		if profile != defaultProfile {
+			t.Fatalf("profile = %q", profile)
+		}
+		factoryHits.Add(1)
+		return server.Client()
+	}
+
+	payloads, errCh := client.StreamConversation(context.Background(), []map[string]any{{"role": "user", "content": "ping"}}, "auto", "")
+	var got []string
+	for payload := range payloads {
+		got = append(got, payload)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[1] != "[DONE]" {
+		t.Fatalf("payloads = %#v", got)
+	}
+	if requirementsHits.Load() != 2 {
 		t.Fatalf("requirements hits = %d", requirementsHits.Load())
+	}
+	if factoryHits.Load() != 1 {
+		t.Fatalf("factory hits = %d", factoryHits.Load())
+	}
+	if client.deviceID == firstDeviceID {
+		t.Fatal("device id was not refreshed")
 	}
 }
 

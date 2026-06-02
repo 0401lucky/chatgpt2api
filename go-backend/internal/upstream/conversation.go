@@ -65,6 +65,25 @@ func (c *Client) StreamConversation(ctx context.Context, messages []map[string]a
 }
 
 func (c *Client) getChatRequirements(ctx context.Context) (ChatRequirements, error) {
+	var lastErr error
+	for attempt := 0; attempt <= cloudflareRetryLimit; attempt++ {
+		requirements, err := c.getChatRequirementsOnce(ctx)
+		if err == nil {
+			return requirements, nil
+		}
+		lastErr = err
+		if !isCloudflareError(err) || attempt == cloudflareRetryLimit {
+			break
+		}
+		c.resetBrowserSession()
+		if bootstrapErr := c.bootstrap(ctx); bootstrapErr != nil && !isCloudflareError(bootstrapErr) {
+			return ChatRequirements{}, bootstrapErr
+		}
+	}
+	return ChatRequirements{}, lastErr
+}
+
+func (c *Client) getChatRequirementsOnce(ctx context.Context) (ChatRequirements, error) {
 	path := "/backend-anon/sentinel/chat-requirements"
 	contextName := "noauth_chat_requirements"
 	sourceP := ""

@@ -21,12 +21,15 @@ const (
 	defaultBaseURL           = "https://chatgpt.com"
 	defaultClientVersion     = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 	defaultClientBuildNumber = "5955942"
-	defaultUserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
-	defaultSecCHUA           = `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`
-	defaultProfile           = "edge101"
+	defaultUserAgent         = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+	defaultSecCHUA           = `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`
+	defaultProfile           = "chrome/windows"
+	defaultFullVersion       = `"145.0.0.0"`
+	defaultFullVersionList   = `"Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.0.0", "Chromium";v="145.0.0.0"`
 	platformOAuthClientID    = "app_2SKx67EdpoN0G6j64rFvigXD"
 	defaultOAuthTokenURL     = "https://auth.openai.com/oauth/token"
 	accountRefreshTimeout    = 20 * time.Second
+	cloudflareRetryLimit     = 2
 )
 
 type AccountLookup interface {
@@ -64,12 +67,13 @@ func (s *Service) NewClient(accessToken string) *Client {
 	client.userAgent = client.fp["user-agent"]
 	client.deviceID = client.fp["oai-device-id"]
 	client.sessionID = client.fp["oai-session-id"]
-	if s.Proxy != nil {
-		client.HTTPClient = s.Proxy.BrowserHTTPClientWithProfile(client.fp["impersonate"], 300*time.Second)
+	client.NewHTTPClient = func(profile string, timeout time.Duration) *http.Client {
+		if s.Proxy != nil {
+			return s.Proxy.BrowserHTTPClientWithProfile(profile, timeout)
+		}
+		return (&proxy.Service{}).BrowserHTTPClientWithProfile(profile, timeout)
 	}
-	if client.HTTPClient == nil {
-		client.HTTPClient = (&proxy.Service{}).BrowserHTTPClientWithProfile(client.fp["impersonate"], 300*time.Second)
-	}
+	client.HTTPClient = client.NewHTTPClient(client.fp["impersonate"], 300*time.Second)
 	return client
 }
 
@@ -142,6 +146,7 @@ type Client struct {
 	AccessToken       string
 	Lookup            AccountLookup
 	HTTPClient        *http.Client
+	NewHTTPClient     func(profile string, timeout time.Duration) *http.Client
 
 	fp           map[string]string
 	userAgent    string
@@ -258,10 +263,15 @@ func (c *Client) bootstrap(ctx context.Context) error {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if isCloudflareChallengeBody(body) {
+			c.setDefaultPOWResources()
+			return nil
+		}
 		return upstreamHTTPError("bootstrap", resp.StatusCode, body)
 	}
 	if isCloudflareChallengeBody(body) {
-		return fmt.Errorf("bootstrap failed: %s", summarizeBody(body))
+		c.setDefaultPOWResources()
+		return nil
 	}
 	c.powSources, c.powDataBuild = parsePOWResources(string(body))
 	if len(c.powSources) == 0 {
@@ -322,6 +332,7 @@ func (c *Client) buildFingerprint() map[string]string {
 			fp[key] = value
 		}
 	}
+	normalizeUnsupportedGoProfile(fp)
 	setDefault(fp, "user-agent", defaultUserAgent)
 	setDefault(fp, "impersonate", defaultProfile)
 	setDefault(fp, "oai-device-id", newUUID())
@@ -344,6 +355,38 @@ func (c *Client) applyBrowserFingerprint() {
 func (c *Client) setDefaultPOWResources() {
 	c.powSources = []string{defaultPOWScript}
 	c.powDataBuild = ""
+}
+
+func normalizeUnsupportedGoProfile(fp map[string]string) {
+	profile := strings.ToLower(strings.TrimSpace(fp["impersonate"]))
+	userAgent := fp["user-agent"]
+	isEdgeProfile := strings.Contains(profile, "edge")
+	isEdgeUA := strings.Contains(userAgent, " Edg/") || strings.Contains(userAgent, " EdgA/") || strings.Contains(userAgent, " EdgiOS/")
+	if !isEdgeProfile && !isEdgeUA {
+		return
+	}
+	fp["impersonate"] = defaultProfile
+	fp["user-agent"] = defaultUserAgent
+	fp["sec-ch-ua"] = defaultSecCHUA
+	delete(fp, "sec-ch-ua-full-version")
+	delete(fp, "sec-ch-ua-full-version-list")
+}
+
+func (c *Client) resetBrowserSession() {
+	c.fp["impersonate"] = defaultProfile
+	c.fp["user-agent"] = defaultUserAgent
+	c.fp["sec-ch-ua"] = defaultSecCHUA
+	c.fp["sec-ch-ua-full-version"] = defaultFullVersion
+	c.fp["sec-ch-ua-full-version-list"] = defaultFullVersionList
+	c.fp["oai-device-id"] = newUUID()
+	c.fp["oai-session-id"] = newUUID()
+	c.userAgent = c.fp["user-agent"]
+	c.deviceID = c.fp["oai-device-id"]
+	c.sessionID = c.fp["oai-session-id"]
+	c.setDefaultPOWResources()
+	if c.NewHTTPClient != nil {
+		c.HTTPClient = c.NewHTTPClient(c.fp["impersonate"], 300*time.Second)
+	}
 }
 
 func (c *Client) headers(route string, extra map[string]string) map[string]string {
@@ -429,8 +472,8 @@ func browserMetadataFromUserAgent(userAgent string) browserHeaderMetadata {
 	}
 	return browserHeaderMetadata{
 		secCHUA:                defaultSecCHUA,
-		secCHUAFullVersion:     `"143.0.3650.96"`,
-		secCHUAFullVersionList: `"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"`,
+		secCHUAFullVersion:     defaultFullVersion,
+		secCHUAFullVersionList: defaultFullVersionList,
 	}
 }
 
@@ -554,6 +597,10 @@ func summarizeBody(body []byte) string {
 		text = text[:maxBodyDetail] + "...(truncated)"
 	}
 	return "body=" + text
+}
+
+func isCloudflareError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "cloudflare challenge")
 }
 
 func isCloudflareChallengeBody(body []byte) bool {

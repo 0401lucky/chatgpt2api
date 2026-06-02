@@ -1,9 +1,8 @@
 package proxy
 
 import (
-	"crypto/tls"
+	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -35,7 +34,7 @@ func browserHTTPClientForProfile(proxyURL, profile string, timeout time.Duration
 	}
 	client, err := builder.Build().Result()
 	if err != nil {
-		return &http.Client{Timeout: timeout, Transport: transportForProxy(proxyURL)}
+		return &http.Client{Timeout: timeout, Transport: errorTransport{err: fmt.Errorf("browser HTTP client build failed: %w", err)}}
 	}
 	return client.Std()
 }
@@ -61,23 +60,10 @@ func applyBrowserProfile(builder *surf.Builder, profile string) *surf.Builder {
 	return impersonate.Chrome()
 }
 
-func transportForProxy(candidate string) *http.Transport {
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		},
-	}
-	if candidate == "" {
-		return transport
-	}
-	parsed, err := url.Parse(candidate)
-	if err != nil || parsed.Host == "" {
-		return transport
-	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "http", "https":
-		transport.Proxy = http.ProxyURL(parsed)
-	}
-	return transport
+type errorTransport struct {
+	err error
+}
+
+func (t errorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, t.err
 }

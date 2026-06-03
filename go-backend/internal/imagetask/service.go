@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"chatgpt2api-go-backend/internal/account"
 	"chatgpt2api-go-backend/internal/auth"
 	"chatgpt2api-go-backend/internal/protocol"
 )
@@ -26,6 +27,7 @@ const (
 type AccountPool interface {
 	AcquireImageToken(ctx context.Context, allow func(map[string]any) bool) (string, func(), error)
 	MarkImageResult(accessToken string, success bool) map[string]any
+	MarkInvalidToken(accessToken string) map[string]any
 }
 
 type Generator interface {
@@ -284,6 +286,9 @@ func (s *Service) runGeneration(key, prompt, model, size string) {
 	data, err := s.generator.GenerateImage(ctx, token, prompt, model, size, "b64_json")
 	if err != nil {
 		s.accounts.MarkImageResult(token, false)
+		if account.IsInvalidTokenError(err) {
+			s.accounts.MarkInvalidToken(token)
+		}
 		s.updateTask(key, map[string]any{
 			"status": StatusError,
 			"error":  err.Error(),
@@ -335,6 +340,9 @@ func (s *Service) runEdit(key, prompt, model, size string, images []protocol.Ima
 	data, err := s.generator.EditImage(ctx, token, prompt, model, size, "b64_json", images)
 	if err != nil {
 		s.accounts.MarkImageResult(token, false)
+		if account.IsInvalidTokenError(err) {
+			s.accounts.MarkInvalidToken(token)
+		}
 		s.updateTask(key, map[string]any{
 			"status": StatusError,
 			"error":  err.Error(),

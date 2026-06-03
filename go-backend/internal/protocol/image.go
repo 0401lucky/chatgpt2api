@@ -17,4 +17,5 @@ type ImageAccountPool interface {
 	GetAvailableAccessTokenFor(ctx context.Context, allow func(map[string]any) bool) (string, error)
 	AcquireImageToken(ctx context.Context, allow func(map[string]any) bool) (string, func(), error)
 	MarkImageResult(accessToken string, success bool) map[string]any
+	MarkInvalidToken(accessToken string) map[string]any
 }

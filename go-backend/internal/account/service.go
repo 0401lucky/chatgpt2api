@@ -621,6 +621,30 @@ func (s *Service) MarkImageResult(accessToken string, success bool) map[string]a
 	return publicAccount(normalized)
 }
 
+func (s *Service) MarkInvalidToken(accessToken string) map[string]any {
+	accessToken = clean(accessToken)
+	if accessToken == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := s.findIndexLocked(accessToken)
+	if index < 0 {
+		return nil
+	}
+	next := copyMap(s.items[index])
+	next["status"] = "异常"
+	next["quota"] = 0
+	normalized := normalizeAccount(next)
+	if normalized == nil {
+		return nil
+	}
+	s.items[index] = normalized
+	delete(s.imageReservations, accessToken)
+	_ = s.saveLocked()
+	return publicAccount(normalized)
+}
+
 func (s *Service) releaseImageToken(token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -892,13 +916,21 @@ func safeError(token, message string) string {
 	return strings.ReplaceAll(message, token, "[access_token]")
 }
 
-func isInvalidTokenRefreshError(err error) bool {
+func IsInvalidTokenError(err error) bool {
 	if err == nil {
 		return false
 	}
-	message := err.Error()
-	return strings.Contains(message, "/backend-api/me failed: HTTP 401") ||
-		strings.Contains(message, "token_invalidated")
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "http 401") ||
+		strings.Contains(message, "status=401") ||
+		strings.Contains(message, "token_invalidated") ||
+		strings.Contains(message, "token_revoked") ||
+		strings.Contains(message, "authentication token has been invalidated") ||
+		strings.Contains(message, "invalidated oauth token")
+}
+
+func isInvalidTokenRefreshError(err error) bool {
+	return IsInvalidTokenError(err)
 }
 
 func copyMap(item map[string]any) map[string]any {

@@ -106,6 +106,44 @@ func TestRefreshAccountsMarksInvalidTokenAbnormal(t *testing.T) {
 	}
 }
 
+func TestMarkInvalidTokenMarksAbnormal(t *testing.T) {
+	service := newTestService(t, 3)
+	const token = "secret-token-alpha-1234567890"
+	service.AddAccounts([]string{token})
+	service.UpdateAccount(token, map[string]any{"quota": 5, "status": "正常", "type": "Plus"})
+
+	item := service.MarkInvalidToken(token)
+	if item == nil {
+		t.Fatal("MarkInvalidToken returned nil")
+	}
+	if item["status"] != "异常" || item["quota"] != 0 {
+		t.Fatalf("invalid token should be abnormal, item = %#v", item)
+	}
+	if _, _, err := service.AcquireImageToken(context.Background(), nil); err == nil {
+		t.Fatal("abnormal account should be skipped by image pool")
+	}
+	if _, err := service.GetAvailableAccessTokenFor(context.Background(), nil); err == nil {
+		t.Fatal("abnormal account should be skipped by text pool")
+	}
+}
+
+func TestIsInvalidTokenErrorAcceptsRuntime401(t *testing.T) {
+	cases := []error{
+		fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),
+		fmt.Errorf("auth_chat_requirements failed: HTTP 401"),
+		fmt.Errorf("conversation failed: status=401"),
+		fmt.Errorf("authentication token has been invalidated"),
+	}
+	for _, err := range cases {
+		if !IsInvalidTokenError(err) {
+			t.Fatalf("IsInvalidTokenError(%q) = false", err)
+		}
+	}
+	if IsInvalidTokenError(fmt.Errorf("bootstrap failed: HTTP 403")) {
+		t.Fatal("403 should not be treated as invalid token")
+	}
+}
+
 func TestRefreshAccountsRotatesTokenBeforeMarkingInvalid(t *testing.T) {
 	service := newTestService(t, 3)
 	const oldToken = "secret-token-alpha-1234567890"

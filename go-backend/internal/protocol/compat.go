@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"chatgpt2api-go-backend/internal/account"
 )
 
 func Response(body map[string]any, chat ConversationStreamer, image ImageGenerator, accounts ImageAccountPool) (map[string]any, error) {
@@ -30,6 +32,9 @@ func Response(body map[string]any, chat ConversationStreamer, image ImageGenerat
 		data, err := image.GenerateImage(context.Background(), token, prompt, model, "1:1", "b64_json")
 		if err != nil {
 			accounts.MarkImageResult(token, false)
+			if account.IsInvalidTokenError(err) {
+				accounts.MarkInvalidToken(token)
+			}
 			return nil, err
 		}
 		accounts.MarkImageResult(token, true)
@@ -66,6 +71,9 @@ func Response(body map[string]any, chat ConversationStreamer, image ImageGenerat
 	}
 	text, err := CollectText(context.Background(), chat, token, model, messages)
 	if err != nil {
+		if account.IsInvalidTokenError(err) {
+			accounts.MarkInvalidToken(token)
+		}
 		return nil, err
 	}
 	output := []map[string]any{{
@@ -104,6 +112,9 @@ func AnthropicMessage(body map[string]any, chat ConversationStreamer, accounts I
 	}
 	text, err := CollectText(context.Background(), chat, token, model, messages)
 	if err != nil {
+		if account.IsInvalidTokenError(err) {
+			accounts.MarkInvalidToken(token)
+		}
 		return nil, err
 	}
 	return map[string]any{

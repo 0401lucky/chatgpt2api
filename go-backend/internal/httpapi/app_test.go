@@ -595,6 +595,27 @@ func TestChatCompletionsUsesAccountPool(t *testing.T) {
 	}
 }
 
+func TestChatCompletion401MarksAccountAbnormal(t *testing.T) {
+	app, accounts := newTestAppWithModels(t, failingChatBackend{
+		err: fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),
+	})
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{
+		"model": "auto",
+		"messages": [{"role": "user", "content": "ping"}]
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	items := accounts.ListAccounts()
+	if items[0]["status"] != "异常" || items[0]["quota"] != 0 {
+		t.Fatalf("401 account should be abnormal, item = %#v", items[0])
+	}
+}
+
 type fakeChatBackend struct {
 	fakeModelLister
 }
@@ -607,6 +628,20 @@ func (fakeChatBackend) StreamConversation(ctx context.Context, accessToken strin
 	out <- "[DONE]"
 	close(out)
 	errCh <- nil
+	close(errCh)
+	return out, errCh
+}
+
+type failingChatBackend struct {
+	fakeModelLister
+	err error
+}
+
+func (f failingChatBackend) StreamConversation(ctx context.Context, accessToken string, messages []map[string]any, model, prompt string) (<-chan string, <-chan error) {
+	out := make(chan string)
+	errCh := make(chan error, 1)
+	close(out)
+	errCh <- f.err
 	close(errCh)
 	return out, errCh
 }
@@ -850,6 +885,27 @@ func TestResponsesAndMessagesCompat(t *testing.T) {
 	}
 }
 
+func TestResponses401MarksAccountAbnormal(t *testing.T) {
+	app, accounts := newTestAppWithModels(t, failingChatBackend{
+		err: fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),
+	})
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{
+		"model": "auto",
+		"input": "你好"
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("responses status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	items := accounts.ListAccounts()
+	if items[0]["status"] != "异常" || items[0]["quota"] != 0 {
+		t.Fatalf("401 account should be abnormal, item = %#v", items[0])
+	}
+}
+
 func TestCreationTaskAliasesWork(t *testing.T) {
 	app, _ := newTestAppWithModels(t, fakeImageBackend{})
 
@@ -888,6 +944,28 @@ func TestCreationTaskAliasesWork(t *testing.T) {
 	t.Fatalf("creation task alias did not finish: %#v", listed)
 }
 
+func TestImageGeneration401MarksAccountAbnormal(t *testing.T) {
+	app, accounts := newTestAppWithModels(t, failingImageBackend{
+		err: fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),
+	})
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(`{
+		"prompt": "一只小猫",
+		"model": "gpt-image-2",
+		"n": 1
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	items := accounts.ListAccounts()
+	if items[0]["status"] != "异常" || items[0]["quota"] != 0 {
+		t.Fatalf("401 account should be abnormal, item = %#v", items[0])
+	}
+}
+
 type fakeImageBackend struct {
 	fakeChatBackend
 }
@@ -898,6 +976,19 @@ func (fakeImageBackend) GenerateImage(ctx context.Context, accessToken, prompt, 
 		item["b64_json"] = "Y2F0"
 	}
 	return []map[string]any{item}, nil
+}
+
+type failingImageBackend struct {
+	fakeModelLister
+	err error
+}
+
+func (f failingImageBackend) GenerateImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string) ([]map[string]any, error) {
+	return nil, f.err
+}
+
+func (f failingImageBackend) EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error) {
+	return nil, f.err
 }
 
 func (fakeImageBackend) EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error) {

@@ -422,6 +422,9 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := protocol.ChatCompletion(r.Context(), a.chat, token, body)
 	if err != nil {
+		if account.IsInvalidTokenError(err) {
+			a.accounts.MarkInvalidToken(token)
+		}
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
 	}
@@ -559,6 +562,9 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 		release()
 		if err != nil {
 			a.accounts.MarkImageResult(token, false)
+			if account.IsInvalidTokenError(err) {
+				a.accounts.MarkInvalidToken(token)
+			}
 			a.logEvent("call", "图片生成失败", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 			return
@@ -615,6 +621,9 @@ func (a *App) handleImagesEdits(w http.ResponseWriter, r *http.Request) {
 	data, err := a.image.EditImage(r.Context(), token, prompt, model, size, responseFormat, inputs)
 	if err != nil {
 		a.accounts.MarkImageResult(token, false)
+		if account.IsInvalidTokenError(err) {
+			a.accounts.MarkInvalidToken(token)
+		}
 		a.logEvent("call", "图片编辑失败", map[string]any{"model": model, "size": size, "image_count": len(inputs), "error": err.Error()})
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
@@ -723,6 +732,9 @@ func (a *App) streamChatCompletion(w http.ResponseWriter, r *http.Request, acces
 		}
 	}
 	if err := <-errCh; err != nil {
+		if account.IsInvalidTokenError(err) {
+			a.accounts.MarkInvalidToken(accessToken)
+		}
 		writeSSEJSON(w, openAIErrorPayload("upstream_error", err.Error()))
 		if flusher != nil {
 			flusher.Flush()

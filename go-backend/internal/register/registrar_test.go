@@ -93,3 +93,25 @@ func TestRequestDetailedWithFinalURLReturnsRedirectCallbackCode(t *testing.T) {
 		t.Fatalf("finalURL = %q, code = %q", finalURL, code)
 	}
 }
+
+func TestAuthorizeErrorDetailSummarizesCloudflareChallenge(t *testing.T) {
+	payload := map[string]any{
+		"body": `<!DOCTYPE html><html><head><title>Just a moment...</title></head><script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script></html>`,
+	}
+
+	if got := authorizeErrorDetail(payload); got != ": cloudflare_challenge" {
+		t.Fatalf("authorizeErrorDetail = %q", got)
+	}
+}
+
+func TestResponseDetailSummarizesCloudflareChallenge(t *testing.T) {
+	payload := map[string]any{
+		"body": `<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>Cloudflare</body></html>`,
+	}
+
+	got := responseDetail(payload)
+	want := `, detail={"error":"cloudflare_challenge","message":"upstream returned Cloudflare challenge page"}`
+	if got != want {
+		t.Fatalf("responseDetail = %q, want %q", got, want)
+	}
+}

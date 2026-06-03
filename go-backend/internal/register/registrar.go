@@ -833,6 +833,9 @@ func (w *registerWorker) step(text string) {
 }
 
 func authorizeErrorDetail(payload map[string]any) string {
+	if isCloudflareChallengePayload(payload) {
+		return ": cloudflare_challenge"
+	}
 	errPayload := asMap(payload["error"])
 	if len(errPayload) == 0 {
 		return responseDetail(payload)
@@ -854,11 +857,21 @@ func responseDetail(payload map[string]any) string {
 	if len(payload) == 0 {
 		return ""
 	}
+	if isCloudflareChallengePayload(payload) {
+		return `, detail={"error":"cloudflare_challenge","message":"upstream returned Cloudflare challenge page"}`
+	}
 	data, err := json.Marshal(payload)
 	if err != nil || len(data) == 0 {
 		return ""
 	}
 	return ", detail=" + string(data)
+}
+
+func isCloudflareChallengePayload(payload map[string]any) bool {
+	body := strings.ToLower(clean(payload["body"]))
+	return strings.Contains(body, "challenges.cloudflare.com") ||
+		strings.Contains(body, "<title>just a moment") ||
+		strings.Contains(body, "cf-browser-verification")
 }
 
 func failedToCreateAccount(payload map[string]any) bool {

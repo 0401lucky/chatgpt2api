@@ -552,24 +552,17 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]map[string]any, 0, body.N)
 	for i := 0; i < body.N; i++ {
-		token, release, err := a.accounts.AcquireImageToken(r.Context(), nil)
+		items, err := protocol.GenerateImageWithPool(r.Context(), a.image, a.accounts, body.Prompt, body.Model, body.Size, body.ResponseFormat)
 		if err != nil {
-			a.logEvent("call", "图片生成失败：无可用账号", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
-			writeOpenAIError(w, http.StatusServiceUnavailable, "no_available_account", err.Error())
-			return
-		}
-		items, err := a.image.GenerateImage(r.Context(), token, body.Prompt, body.Model, body.Size, body.ResponseFormat)
-		release()
-		if err != nil {
-			a.accounts.MarkImageResult(token, false)
-			if account.IsInvalidTokenError(err) {
-				a.accounts.MarkInvalidToken(token)
+			if isNoAvailableImageAccountError(err) {
+				a.logEvent("call", "图片生成失败：无可用账号", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
+				writeOpenAIError(w, http.StatusServiceUnavailable, "no_available_account", err.Error())
+				return
 			}
 			a.logEvent("call", "图片生成失败", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 			return
 		}
-		a.accounts.MarkImageResult(token, true)
 		data = append(data, items...)
 	}
 	a.local.Images().SaveHistoryRecord("/v1/images/generations", "generate", body.Model, body.Prompt, data, map[string]any{
@@ -611,24 +604,17 @@ func (a *App) handleImagesEdits(w http.ResponseWriter, r *http.Request) {
 			MimeType: item.MimeType,
 		})
 	}
-	token, release, err := a.accounts.AcquireImageToken(r.Context(), nil)
+	data, err := protocol.EditImageWithPool(r.Context(), a.image, a.accounts, prompt, model, size, responseFormat, inputs)
 	if err != nil {
-		a.logEvent("call", "图片编辑失败：无可用账号", map[string]any{"model": model, "size": size, "error": err.Error()})
-		writeOpenAIError(w, http.StatusServiceUnavailable, "no_available_account", err.Error())
-		return
-	}
-	defer release()
-	data, err := a.image.EditImage(r.Context(), token, prompt, model, size, responseFormat, inputs)
-	if err != nil {
-		a.accounts.MarkImageResult(token, false)
-		if account.IsInvalidTokenError(err) {
-			a.accounts.MarkInvalidToken(token)
+		if isNoAvailableImageAccountError(err) {
+			a.logEvent("call", "图片编辑失败：无可用账号", map[string]any{"model": model, "size": size, "error": err.Error()})
+			writeOpenAIError(w, http.StatusServiceUnavailable, "no_available_account", err.Error())
+			return
 		}
 		a.logEvent("call", "图片编辑失败", map[string]any{"model": model, "size": size, "image_count": len(inputs), "error": err.Error()})
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
 	}
-	a.accounts.MarkImageResult(token, true)
 	a.local.Images().SaveHistoryRecord("/v1/images/edits", "edit", model, prompt, data, map[string]any{
 		"input_tokens":  0,
 		"output_tokens": 0,
@@ -799,6 +785,14 @@ func writeDetailError(w http.ResponseWriter, status int, message string) {
 
 func writeOpenAIError(w http.ResponseWriter, status int, errorType, message string) {
 	writeJSON(w, status, openAIErrorPayload(errorType, message))
+}
+
+func isNoAvailableImageAccountError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "no available image quota") || strings.Contains(text, "no available account")
 }
 
 func openAIErrorPayload(errorType, message string) map[string]any {

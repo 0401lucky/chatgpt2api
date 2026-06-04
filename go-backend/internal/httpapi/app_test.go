@@ -742,6 +742,47 @@ func TestDirectImageGenerationDefaultsToB64JSON(t *testing.T) {
 	}
 }
 
+func TestDirectImageGenerationSkipsInvalidAccountAndRetries(t *testing.T) {
+	backend := &retryingImageBackend{
+		err: fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),
+		failTokens: map[string]bool{
+			"token-alpha-1234567890": true,
+		},
+	}
+	app, accounts := newTestAppWithModels(t, backend)
+	addImageAccount(t, accounts, "token-beta-1234567890", 5)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(`{
+		"prompt": "一只小猫",
+		"model": "gpt-image-2",
+		"response_format": "b64_json"
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if strings.Join(backend.generateTokens, ",") != "token-alpha-1234567890,token-beta-1234567890" {
+		t.Fatalf("generate tokens = %#v", backend.generateTokens)
+	}
+	items := accounts.ListAccounts()
+	if items[0]["status"] != "异常" || items[0]["quota"] != 0 {
+		t.Fatalf("invalid account should be abnormal, item = %#v", items[0])
+	}
+	if items[1]["status"] != "正常" || items[1]["quota"] != 4 {
+		t.Fatalf("retry account should be used successfully, item = %#v", items[1])
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	data := body["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["b64_json"] != "Y2F0" {
+		t.Fatalf("data = %#v", body["data"])
+	}
+}
+
 func TestImageEditEndpointsValidateMultipart(t *testing.T) {
 	app, _ := newTestAppWithModels(t, fakeImageBackend{})
 
@@ -844,6 +885,48 @@ func TestImageEditEndpointsSupportMultipart(t *testing.T) {
 	}
 }
 
+func TestDirectImageEditSkipsInvalidAccountAndRetries(t *testing.T) {
+	backend := &retryingImageBackend{
+		err: fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),
+		failTokens: map[string]bool{
+			"token-alpha-1234567890": true,
+		},
+	}
+	app, accounts := newTestAppWithModels(t, backend)
+	addImageAccount(t, accounts, "token-beta-1234567890", 5)
+
+	openAIBody := &bytes.Buffer{}
+	openAIWriter := multipart.NewWriter(openAIBody)
+	_ = openAIWriter.WriteField("prompt", "把这张图改成复古海报")
+	_ = openAIWriter.WriteField("model", "gpt-image-2")
+	_ = openAIWriter.WriteField("response_format", "b64_json")
+	part, err := openAIWriter.CreateFormFile("image", "first.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte("fake-image-bytes"))
+	_ = openAIWriter.Close()
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(openAIBody.Bytes()))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	req.Header.Set("Content-Type", openAIWriter.FormDataContentType())
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if strings.Join(backend.editTokens, ",") != "token-alpha-1234567890,token-beta-1234567890" {
+		t.Fatalf("edit tokens = %#v", backend.editTokens)
+	}
+	items := accounts.ListAccounts()
+	if items[0]["status"] != "异常" || items[0]["quota"] != 0 {
+		t.Fatalf("invalid account should be abnormal, item = %#v", items[0])
+	}
+	if items[1]["status"] != "正常" || items[1]["quota"] != 4 {
+		t.Fatalf("retry account should be used successfully, item = %#v", items[1])
+	}
+}
+
 func TestResponsesAndMessagesCompat(t *testing.T) {
 	app, _ := newTestAppWithModels(t, fakeImageBackend{})
 
@@ -882,6 +965,36 @@ func TestResponsesAndMessagesCompat(t *testing.T) {
 	}
 	if msgBody["type"] != "message" {
 		t.Fatalf("messages body = %#v", msgBody)
+	}
+}
+
+func TestResponsesImageToolSkipsInvalidAccountAndRetries(t *testing.T) {
+	backend := &retryingImageBackend{
+		err: fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),
+		failTokens: map[string]bool{
+			"token-alpha-1234567890": true,
+		},
+	}
+	app, accounts := newTestAppWithModels(t, backend)
+	addImageAccount(t, accounts, "token-beta-1234567890", 5)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{
+		"model": "gpt-image-2",
+		"input": "画一只小猫",
+		"tools": [{"type": "image_generation"}]
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("responses status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if strings.Join(backend.generateTokens, ",") != "token-alpha-1234567890,token-beta-1234567890" {
+		t.Fatalf("generate tokens = %#v", backend.generateTokens)
+	}
+	items := accounts.ListAccounts()
+	if items[0]["status"] != "异常" || items[0]["quota"] != 0 {
+		t.Fatalf("invalid account should be abnormal, item = %#v", items[0])
 	}
 }
 
@@ -957,12 +1070,20 @@ func TestImageGeneration401MarksAccountAbnormal(t *testing.T) {
 	}`)))
 	req.Header.Set("Authorization", "Bearer admin-key")
 	app.ServeHTTP(resp, req)
-	if resp.Code != http.StatusBadGateway {
+	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
 	}
 	items := accounts.ListAccounts()
 	if items[0]["status"] != "异常" || items[0]["quota"] != 0 {
 		t.Fatalf("401 account should be abnormal, item = %#v", items[0])
+	}
+}
+
+func addImageAccount(t *testing.T, accounts *account.Service, token string, quota int) {
+	t.Helper()
+	accounts.AddAccounts([]string{token})
+	if item := accounts.UpdateAccount(token, map[string]any{"quota": quota, "type": "Plus", "status": "正常"}); item == nil {
+		t.Fatalf("failed to seed account %s", token)
 	}
 }
 
@@ -976,6 +1097,30 @@ func (fakeImageBackend) GenerateImage(ctx context.Context, accessToken, prompt, 
 		item["b64_json"] = "Y2F0"
 	}
 	return []map[string]any{item}, nil
+}
+
+type retryingImageBackend struct {
+	fakeModelLister
+	err            error
+	failTokens     map[string]bool
+	generateTokens []string
+	editTokens     []string
+}
+
+func (f *retryingImageBackend) GenerateImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string) ([]map[string]any, error) {
+	f.generateTokens = append(f.generateTokens, accessToken)
+	if f.failTokens[accessToken] {
+		return nil, f.err
+	}
+	return fakeImageBackend{}.GenerateImage(ctx, accessToken, prompt, model, size, responseFormat)
+}
+
+func (f *retryingImageBackend) EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error) {
+	f.editTokens = append(f.editTokens, accessToken)
+	if f.failTokens[accessToken] {
+		return nil, f.err
+	}
+	return fakeImageBackend{}.EditImage(ctx, accessToken, prompt, model, size, responseFormat, images)
 }
 
 type failingImageBackend struct {

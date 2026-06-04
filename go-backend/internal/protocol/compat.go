@@ -24,20 +24,10 @@ func Response(body map[string]any, chat ConversationStreamer, image ImageGenerat
 		if model == "auto" {
 			model = "gpt-image-2"
 		}
-		token, release, err := accounts.AcquireImageToken(context.Background(), nil)
+		data, err := GenerateImageWithPool(context.Background(), image, accounts, prompt, model, "1:1", "b64_json")
 		if err != nil {
 			return nil, err
 		}
-		defer release()
-		data, err := image.GenerateImage(context.Background(), token, prompt, model, "1:1", "b64_json")
-		if err != nil {
-			accounts.MarkImageResult(token, false)
-			if account.IsInvalidTokenError(err) {
-				accounts.MarkInvalidToken(token)
-			}
-			return nil, err
-		}
-		accounts.MarkImageResult(token, true)
 		output := make([]map[string]any, 0, len(data))
 		for i, item := range data {
 			if b64 := clean(item["b64_json"]); b64 != "" {

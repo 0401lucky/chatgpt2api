@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"chatgpt2api-go-backend/internal/account"
 	"chatgpt2api-go-backend/internal/auth"
 	"chatgpt2api-go-backend/internal/protocol"
 )
@@ -272,7 +271,7 @@ func (s *Service) runGeneration(key, prompt, model, size string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.taskTimeout)
 	defer cancel()
-	token, release, err := s.accounts.AcquireImageToken(ctx, nil)
+	data, err := protocol.GenerateImageWithPool(ctx, s.generator, s.accounts, prompt, model, size, "b64_json")
 	if err != nil {
 		s.updateTask(key, map[string]any{
 			"status": StatusError,
@@ -281,31 +280,6 @@ func (s *Service) runGeneration(key, prompt, model, size string) {
 		})
 		return
 	}
-	defer release()
-
-	data, err := s.generator.GenerateImage(ctx, token, prompt, model, size, "b64_json")
-	if err != nil {
-		s.accounts.MarkImageResult(token, false)
-		if account.IsInvalidTokenError(err) {
-			s.accounts.MarkInvalidToken(token)
-		}
-		s.updateTask(key, map[string]any{
-			"status": StatusError,
-			"error":  err.Error(),
-			"data":   []map[string]any{},
-		})
-		return
-	}
-	if len(data) == 0 {
-		s.accounts.MarkImageResult(token, false)
-		s.updateTask(key, map[string]any{
-			"status": StatusError,
-			"error":  "上游没有返回图片，请检查账号额度或稍后重试",
-			"data":   []map[string]any{},
-		})
-		return
-	}
-	s.accounts.MarkImageResult(token, true)
 	if s.recorder != nil {
 		s.recorder.SaveHistoryRecord("/api/image-tasks/generations", "generate", model, prompt, data, nil)
 	}
@@ -326,7 +300,7 @@ func (s *Service) runEdit(key, prompt, model, size string, images []protocol.Ima
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.taskTimeout)
 	defer cancel()
-	token, release, err := s.accounts.AcquireImageToken(ctx, nil)
+	data, err := protocol.EditImageWithPool(ctx, s.generator, s.accounts, prompt, model, size, "b64_json", images)
 	if err != nil {
 		s.updateTask(key, map[string]any{
 			"status": StatusError,
@@ -335,31 +309,6 @@ func (s *Service) runEdit(key, prompt, model, size string, images []protocol.Ima
 		})
 		return
 	}
-	defer release()
-
-	data, err := s.generator.EditImage(ctx, token, prompt, model, size, "b64_json", images)
-	if err != nil {
-		s.accounts.MarkImageResult(token, false)
-		if account.IsInvalidTokenError(err) {
-			s.accounts.MarkInvalidToken(token)
-		}
-		s.updateTask(key, map[string]any{
-			"status": StatusError,
-			"error":  err.Error(),
-			"data":   []map[string]any{},
-		})
-		return
-	}
-	if len(data) == 0 {
-		s.accounts.MarkImageResult(token, false)
-		s.updateTask(key, map[string]any{
-			"status": StatusError,
-			"error":  "上游没有返回图片，请检查账号额度或稍后重试",
-			"data":   []map[string]any{},
-		})
-		return
-	}
-	s.accounts.MarkImageResult(token, true)
 	if s.recorder != nil {
 		s.recorder.SaveHistoryRecord("/api/image-tasks/edits", "edit", model, prompt, data, nil)
 	}

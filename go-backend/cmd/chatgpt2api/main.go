@@ -30,6 +30,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("load accounts: %v", err)
 	}
+	accounts.SetAutoRemoveOptions(cfg.AutoRemoveInvalidAccounts, cfg.AutoRemoveRateLimitedAccounts)
 	authService := auth.NewService(store, cfg.AuthKey)
 	proxyService := proxy.NewService(cfg.Proxy)
 	upstreamService := upstream.NewService(accounts, proxyService)

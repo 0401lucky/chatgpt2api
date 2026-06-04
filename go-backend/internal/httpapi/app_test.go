@@ -796,6 +796,67 @@ func TestDirectImageGenerationSupportsB64JSON(t *testing.T) {
 	}
 }
 
+func TestDirectImageGenerationUploadsToImgbedWhenEnabled(t *testing.T) {
+	uploadCount := 0
+	imgbed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uploadCount++
+		if r.URL.Path != "/upload" {
+			t.Errorf("upload path = %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("upload method = %s", r.Method)
+		}
+		if r.Header.Get("Authorization") != "Bearer upload-token" {
+			t.Errorf("authorization = %q", r.Header.Get("Authorization"))
+		}
+		if r.URL.Query().Get("uploadFolder") == "" || r.URL.Query().Get("returnFormat") != "full" {
+			t.Errorf("upload query = %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]string{{"src": "/uploads/cat.png"}})
+	}))
+	defer imgbed.Close()
+
+	app, _ := newTestAppWithModels(t, fakeImageBackend{})
+	app.config.Raw = map[string]any{
+		"imgbed": map[string]any{
+			"enabled":           true,
+			"base_url":          imgbed.URL,
+			"api_token":         "upload-token",
+			"folder_prefix":     "chatgpt2api",
+			"timeout_seconds":   2,
+			"fallback_to_local": true,
+		},
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(`{
+		"prompt": "一只小猫",
+		"model": "gpt-image-2",
+		"response_format": "url"
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if uploadCount != 1 {
+		t.Fatalf("upload count = %d", uploadCount)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	items := body["data"].([]any)
+	first := items[0].(map[string]any)
+	if first["url"] != imgbed.URL+"/uploads/cat.png" {
+		t.Fatalf("url = %#v", first["url"])
+	}
+	if _, ok := first["b64_json"]; ok {
+		t.Fatalf("url response should not include b64_json: %#v", first)
+	}
+}
+
 func TestDirectImageGenerationDefaultsToB64JSON(t *testing.T) {
 	app, _ := newTestAppWithModels(t, fakeImageBackend{})
 

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -16,7 +17,10 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -65,6 +69,7 @@ func (s *Services) Images() *ImageService {
 		ThumbnailsDir: s.Config.ImageThumbnailsDir(),
 		HistoryFile:   s.Config.ImageHistoryFile(),
 		TagsFile:      filepath.Join(s.DataDir, "image_tags.json"),
+		Config:        s.Config,
 	}
 }
 
@@ -188,6 +193,7 @@ type ImageService struct {
 	ThumbnailsDir string
 	HistoryFile   string
 	TagsFile      string
+	Config        ConfigProvider
 }
 
 func (s *ImageService) List(baseURL, startDate, endDate string) map[string]any {
@@ -510,6 +516,7 @@ func (s *ImageService) SaveHistoryRecord(sourceEndpoint, mode, model, prompt str
 					"rel_path":  rel,
 					"mime_type": mime.TypeByExtension(filepath.Ext(rel)),
 				})
+				continue
 			}
 		}
 		if clean(item["b64_json"]) == "" {
@@ -519,7 +526,7 @@ func (s *ImageService) SaveHistoryRecord(sourceEndpoint, mode, model, prompt str
 		if err != nil {
 			continue
 		}
-		rel, err := s.SaveImageBytes(raw, fmt.Sprintf("%s-%d%s", recordID, index+1, imageExt(raw)), "")
+		rel, err := s.SaveLocalImageBytes(raw, fmt.Sprintf("%s-%d%s", recordID, index+1, imageExt(raw)))
 		if err != nil {
 			continue
 		}
@@ -551,9 +558,64 @@ func (s *ImageService) SaveHistoryRecord(sourceEndpoint, mode, model, prompt str
 	_ = saveJSON(s.HistoryFile, records)
 }
 
+func (s *ImageService) PrepareResultData(data []map[string]any, baseURL string) ([]map[string]any, error) {
+	if len(data) == 0 {
+		return data, nil
+	}
+	out := make([]map[string]any, 0, len(data))
+	for _, item := range data {
+		next := copyMap(item)
+		b64 := clean(next["b64_json"])
+		if b64 != "" {
+			if raw, err := decodeBase64(b64); err == nil && len(raw) > 0 {
+				url, saveErr := s.SaveImageBytes(raw, imageFilename(raw), baseURL)
+				if saveErr != nil {
+					return nil, saveErr
+				}
+				if url != "" {
+					next["url"] = url
+				}
+			}
+		}
+		out = append(out, next)
+	}
+	return out, nil
+}
+
 func (s *ImageService) SaveImageBytes(raw []byte, filename, baseURL string) (string, error) {
 	if len(raw) == 0 {
 		return "", errors.New("image is empty")
+	}
+	settings := map[string]any{}
+	if s.Config != nil {
+		settings = s.Config.ImgbedSettings(false)
+	}
+	if boolValue(settings["enabled"], false) {
+		url, err := uploadToImgbed(raw, settings)
+		if err == nil {
+			return url, nil
+		}
+		if !boolValue(settings["fallback_to_local"], true) {
+			return "", err
+		}
+	}
+	rel, err := s.SaveLocalImageBytes(raw, filename)
+	if err != nil {
+		return "", err
+	}
+	if baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/"); baseURL != "" {
+		return baseURL + "/images/" + pathURL(rel), nil
+	}
+	return rel, nil
+}
+
+func (s *ImageService) SaveLocalImageBytes(raw []byte, filename string) (string, error) {
+	if len(raw) == 0 {
+		return "", errors.New("image is empty")
+	}
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		filename = imageFilename(raw)
 	}
 	day := localTime(time.Now())
 	rel := filepath.ToSlash(filepath.Join(day.Format("2006"), day.Format("01"), day.Format("02"), filename))
@@ -856,26 +918,107 @@ func (b *BackupService) buildArchive(settings map[string]any) ([]byte, error) {
 }
 
 func TestImgbed(settings map[string]any) (map[string]any, error) {
+	url, err := uploadToImgbed(testImgbedPNG(), settings)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "url": url}, nil
+}
+
+func uploadToImgbed(raw []byte, settings map[string]any) (string, error) {
 	baseURL := strings.TrimRight(clean(settings["base_url"]), "/")
 	token := clean(settings["api_token"])
 	if baseURL == "" {
-		return nil, errors.New("图床地址不能为空")
+		return "", errors.New("图床地址不能为空")
 	}
 	if token == "" || token == "********" {
-		return nil, errors.New("API Token 不能为空")
+		return "", errors.New("API Token 不能为空")
 	}
-	req, err := http.NewRequest(http.MethodGet, baseURL, nil)
+	endpoint, err := url.Parse(baseURL + "/upload")
 	if err != nil {
-		return nil, err
+		return "", err
+	}
+	now := localTime(time.Now())
+	folderPrefix := strings.Trim(clean(settings["folder_prefix"]), "/")
+	if folderPrefix == "" {
+		folderPrefix = "chatgpt2api"
+	}
+	query := endpoint.Query()
+	query.Set("uploadFolder", folderPrefix+"/"+now.Format("2006/01/02"))
+	query.Set("returnFormat", "full")
+	query.Set("uploadNameType", "default")
+	query.Set("autoRetry", "true")
+	endpoint.RawQuery = query.Encode()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	contentType := firstNonEmpty(mimeType(raw), "image/png")
+	header := textproto.MIMEHeader{}
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename="%s"`, imageFilename(raw)))
+	header.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return "", err
+	}
+	if _, err := part.Write(raw); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint.String(), body)
+	if err != nil {
+		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 	client := &http.Client{Timeout: time.Duration(intValue(settings["timeout_seconds"], 30)) * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer resp.Body.Close()
-	return map[string]any{"ok": resp.StatusCode < 500, "url": baseURL}, nil
+	payload, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("图床上传失败：HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+	var parsed any
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		return "", err
+	}
+	return imgbedResponseURL(parsed, baseURL)
+}
+
+func imgbedResponseURL(payload any, baseURL string) (string, error) {
+	switch value := payload.(type) {
+	case []any:
+		if len(value) == 0 {
+			break
+		}
+		return imgbedResponseURL(value[0], baseURL)
+	case map[string]any:
+		for _, key := range []string{"src", "url"} {
+			if candidate := normalizeImgbedURL(clean(value[key]), baseURL); candidate != "" {
+				return candidate, nil
+			}
+		}
+		if nested, ok := value["data"]; ok {
+			return imgbedResponseURL(nested, baseURL)
+		}
+	}
+	return "", fmt.Errorf("图床返回缺少图片地址：%v", payload)
+}
+
+func normalizeImgbedURL(src, baseURL string) string {
+	src = strings.TrimSpace(src)
+	if src == "" {
+		return ""
+	}
+	if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		return src
+	}
+	return strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(src, "/")
 }
 
 func normalizeRegister(raw map[string]any) map[string]any {
@@ -1329,6 +1472,11 @@ func base64StdDecode(value string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(value)
 }
 
+func imageFilename(raw []byte) string {
+	sum := md5.Sum(raw)
+	return fmt.Sprintf("%d_%s%s", time.Now().Unix(), hex.EncodeToString(sum[:]), imageExt(raw))
+}
+
 func imageExt(raw []byte) string {
 	switch mimeType(raw) {
 	case "image/jpeg":
@@ -1347,4 +1495,12 @@ func mimeType(raw []byte) string {
 		return "application/octet-stream"
 	}
 	return http.DetectContentType(raw)
+}
+
+func testImgbedPNG() []byte {
+	raw, _ := hex.DecodeString(
+		"89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4" +
+			"890000000d49444154789c630001000000050001000d0a2db40000000049454e44ae426082",
+	)
+	return raw
 }

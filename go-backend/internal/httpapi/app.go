@@ -61,6 +61,7 @@ func New(cfg *config.Config, accounts *account.Service, authService *auth.Servic
 		started:  time.Now(),
 	}
 	accounts.SetPasswordReloginProvider(app.register)
+	accounts.SetAutoRemoveOptions(cfg.AutoRemoveInvalidAccounts, cfg.AutoRemoveRateLimitedAccounts)
 	if chat, ok := models.(ConversationStreamer); ok {
 		app.chat = chat
 	}
@@ -626,7 +627,8 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(body.ResponseFormat) == "" {
 		body.ResponseFormat = "b64_json"
 	}
-	data, errorsOut := a.generateImagesWithPool(r.Context(), body.Prompt, body.Model, body.Size, body.ResponseFormat, body.N)
+	responseFormat := normalizeImageResponseFormat(body.ResponseFormat)
+	data, errorsOut := a.generateImagesWithPool(r.Context(), body.Prompt, body.Model, body.Size, "b64_json", body.N)
 	if len(data) == 0 && len(errorsOut) > 0 {
 		err := errorsOut[0]
 		if isNoAvailableImageAccountError(err) {
@@ -651,6 +653,12 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 			"errors": errorMessages(errorsOut),
 		})
 	}
+	data, err := a.local.Images().PrepareResultData(data, resolveBaseURL(a.config.BaseURL, r))
+	if err != nil {
+		a.logEvent("call", "图片生成保存失败", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return
+	}
 	a.local.Images().SaveHistoryRecord("/v1/images/generations", "generate", body.Model, body.Prompt, data, map[string]any{
 		"input_tokens":  0,
 		"output_tokens": 0,
@@ -659,7 +667,7 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 	a.logEvent("call", "图片生成成功", map[string]any{"model": body.Model, "size": body.Size, "count": len(data)})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"created": time.Now().Unix(),
-		"data":    data,
+		"data":    imageResponseData(data, responseFormat),
 	})
 }
 
@@ -730,7 +738,8 @@ func (a *App) handleImagesEdits(w http.ResponseWriter, r *http.Request) {
 			MimeType: item.MimeType,
 		})
 	}
-	data, err := protocol.EditImageWithPool(r.Context(), a.image, a.accounts, prompt, model, size, responseFormat, inputs)
+	responseFormat = normalizeImageResponseFormat(responseFormat)
+	data, err := protocol.EditImageWithPool(r.Context(), a.image, a.accounts, prompt, model, size, "b64_json", inputs)
 	if err != nil {
 		if isNoAvailableImageAccountError(err) {
 			a.logEvent("call", "图片编辑失败：无可用账号", map[string]any{"model": model, "size": size, "error": err.Error()})
@@ -738,6 +747,12 @@ func (a *App) handleImagesEdits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.logEvent("call", "图片编辑失败", map[string]any{"model": model, "size": size, "image_count": len(inputs), "error": err.Error()})
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return
+	}
+	data, err = a.local.Images().PrepareResultData(data, resolveBaseURL(a.config.BaseURL, r))
+	if err != nil {
+		a.logEvent("call", "图片编辑保存失败", map[string]any{"model": model, "size": size, "image_count": len(inputs), "error": err.Error()})
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
 	}
@@ -749,7 +764,7 @@ func (a *App) handleImagesEdits(w http.ResponseWriter, r *http.Request) {
 	a.logEvent("call", "图片编辑成功", map[string]any{"model": model, "size": size, "image_count": len(inputs), "count": len(data)})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"created": time.Now().Unix(),
-		"data":    data,
+		"data":    imageResponseData(data, responseFormat),
 	})
 }
 
@@ -929,6 +944,40 @@ func errorMessages(errorsOut []error) []string {
 		}
 	}
 	return messages
+}
+
+func normalizeImageResponseFormat(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "url") {
+		return "url"
+	}
+	return "b64_json"
+}
+
+func imageResponseData(data []map[string]any, responseFormat string) []map[string]any {
+	out := make([]map[string]any, 0, len(data))
+	for _, item := range data {
+		next := map[string]any{}
+		if revisedPrompt := cleanResponseString(item["revised_prompt"]); revisedPrompt != "" {
+			next["revised_prompt"] = revisedPrompt
+		}
+		if url := cleanResponseString(item["url"]); url != "" {
+			next["url"] = url
+		}
+		if responseFormat == "b64_json" {
+			if b64 := cleanResponseString(item["b64_json"]); b64 != "" {
+				next["b64_json"] = b64
+			}
+		}
+		out = append(out, next)
+	}
+	return out
+}
+
+func cleanResponseString(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
 }
 
 func openAIErrorPayload(errorType, message string) map[string]any {

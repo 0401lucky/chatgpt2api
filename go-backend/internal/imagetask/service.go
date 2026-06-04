@@ -36,6 +36,7 @@ type Generator interface {
 
 type HistoryRecorder interface {
 	SaveHistoryRecord(sourceEndpoint, mode, model, prompt string, data []map[string]any, usage map[string]any)
+	PrepareResultData(data []map[string]any, baseURL string) ([]map[string]any, error)
 }
 
 type Service struct {
@@ -281,6 +282,15 @@ func (s *Service) runGeneration(key, prompt, model, size string) {
 		return
 	}
 	if s.recorder != nil {
+		data, err = s.recorder.PrepareResultData(data, "")
+		if err != nil {
+			s.updateTask(key, map[string]any{
+				"status": StatusError,
+				"error":  err.Error(),
+				"data":   []map[string]any{},
+			})
+			return
+		}
 		s.recorder.SaveHistoryRecord("/api/image-tasks/generations", "generate", model, prompt, data, nil)
 	}
 	s.updateTask(key, map[string]any{"status": StatusSuccess, "data": data, "error": ""})
@@ -310,6 +320,15 @@ func (s *Service) runEdit(key, prompt, model, size string, images []protocol.Ima
 		return
 	}
 	if s.recorder != nil {
+		data, err = s.recorder.PrepareResultData(data, "")
+		if err != nil {
+			s.updateTask(key, map[string]any{
+				"status": StatusError,
+				"error":  err.Error(),
+				"data":   []map[string]any{},
+			})
+			return
+		}
 		s.recorder.SaveHistoryRecord("/api/image-tasks/edits", "edit", model, prompt, data, nil)
 	}
 	s.updateTask(key, map[string]any{"status": StatusSuccess, "data": data, "error": ""})

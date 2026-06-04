@@ -11,22 +11,24 @@ import (
 )
 
 type Config struct {
-	mu                           sync.Mutex
-	ProjectRoot                  string
-	ConfigFile                   string
-	DataDir                      string
-	VersionFile                  string
-	AuthKey                      string
-	RefreshAccountIntervalMinute int
-	ImageAccountConcurrency      int
-	ImageRetentionDays           int
-	ImagePollTimeoutSecs         int
-	ImagePollInitialWaitSecs     int
-	ImagePollIntervalSecs        int
-	BaseURL                      string
-	Proxy                        string
-	Version                      string
-	Raw                          map[string]any
+	mu                            sync.Mutex
+	ProjectRoot                   string
+	ConfigFile                    string
+	DataDir                       string
+	VersionFile                   string
+	AuthKey                       string
+	RefreshAccountIntervalMinute  int
+	ImageAccountConcurrency       int
+	ImageRetentionDays            int
+	ImagePollTimeoutSecs          int
+	ImagePollInitialWaitSecs      int
+	ImagePollIntervalSecs         int
+	AutoRemoveInvalidAccounts     bool
+	AutoRemoveRateLimitedAccounts bool
+	BaseURL                       string
+	Proxy                         string
+	Version                       string
+	Raw                           map[string]any
 }
 
 var defaultBackupInclude = map[string]bool{
@@ -65,20 +67,22 @@ func LoadFrom(projectRoot, configFile string) (*Config, error) {
 		return nil, errors.New("auth-key 未设置，请设置 CHATGPT2API_AUTH_KEY 或 config.json 中的 auth-key")
 	}
 	cfg := &Config{
-		ProjectRoot:                  projectRoot,
-		ConfigFile:                   configFile,
-		DataDir:                      dataDir,
-		VersionFile:                  filepath.Join(projectRoot, "VERSION"),
-		AuthKey:                      authKey,
-		RefreshAccountIntervalMinute: intValue(raw["refresh_account_interval_minute"], 60, 1),
-		ImageAccountConcurrency:      intValue(raw["image_account_concurrency"], 3, 1),
-		ImageRetentionDays:           intValue(raw["image_retention_days"], 30, 1),
-		ImagePollTimeoutSecs:         intValue(raw["image_poll_timeout_secs"], 120, 1),
-		ImagePollInitialWaitSecs:     intValue(raw["image_poll_initial_wait_secs"], 10, 0),
-		ImagePollIntervalSecs:        intValue(raw["image_poll_interval_secs"], 10, 1),
-		BaseURL:                      strings.TrimRight(strings.TrimSpace(envOr("CHATGPT2API_BASE_URL", cleanString(raw["base_url"]))), "/"),
-		Proxy:                        strings.TrimSpace(envOr("CHATGPT2API_PROXY", cleanString(raw["proxy"]))),
-		Raw:                          raw,
+		ProjectRoot:                   projectRoot,
+		ConfigFile:                    configFile,
+		DataDir:                       dataDir,
+		VersionFile:                   filepath.Join(projectRoot, "VERSION"),
+		AuthKey:                       authKey,
+		RefreshAccountIntervalMinute:  intValue(raw["refresh_account_interval_minute"], 60, 1),
+		ImageAccountConcurrency:       intValue(raw["image_account_concurrency"], 3, 1),
+		ImageRetentionDays:            intValue(raw["image_retention_days"], 30, 1),
+		ImagePollTimeoutSecs:          intValue(raw["image_poll_timeout_secs"], 120, 1),
+		ImagePollInitialWaitSecs:      intValue(raw["image_poll_initial_wait_secs"], 10, 0),
+		ImagePollIntervalSecs:         intValue(raw["image_poll_interval_secs"], 10, 1),
+		AutoRemoveInvalidAccounts:     boolValue(raw["auto_remove_invalid_accounts"], false),
+		AutoRemoveRateLimitedAccounts: boolValue(raw["auto_remove_rate_limited_accounts"], false),
+		BaseURL:                       strings.TrimRight(strings.TrimSpace(envOr("CHATGPT2API_BASE_URL", cleanString(raw["base_url"]))), "/"),
+		Proxy:                         strings.TrimSpace(envOr("CHATGPT2API_PROXY", cleanString(raw["proxy"]))),
+		Raw:                           raw,
 	}
 	cfg.Version = readVersion(cfg.VersionFile)
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
@@ -194,8 +198,8 @@ func (c *Config) publicConfigLocked() map[string]any {
 	data["image_account_concurrency"] = c.ImageAccountConcurrency
 	data["proxy"] = c.Proxy
 	data["base_url"] = c.BaseURL
-	data["auto_remove_invalid_accounts"] = boolValue(data["auto_remove_invalid_accounts"], false)
-	data["auto_remove_rate_limited_accounts"] = boolValue(data["auto_remove_rate_limited_accounts"], false)
+	data["auto_remove_invalid_accounts"] = c.AutoRemoveInvalidAccounts
+	data["auto_remove_rate_limited_accounts"] = c.AutoRemoveRateLimitedAccounts
 	if _, ok := data["global_system_prompt"]; !ok {
 		data["global_system_prompt"] = ""
 	}
@@ -219,6 +223,8 @@ func (c *Config) refreshDerivedLocked() {
 	c.ImagePollTimeoutSecs = intValue(c.Raw["image_poll_timeout_secs"], 120, 1)
 	c.ImagePollInitialWaitSecs = intValue(c.Raw["image_poll_initial_wait_secs"], 10, 0)
 	c.ImagePollIntervalSecs = intValue(c.Raw["image_poll_interval_secs"], 10, 1)
+	c.AutoRemoveInvalidAccounts = boolValue(c.Raw["auto_remove_invalid_accounts"], false)
+	c.AutoRemoveRateLimitedAccounts = boolValue(c.Raw["auto_remove_rate_limited_accounts"], false)
 	c.BaseURL = strings.TrimRight(strings.TrimSpace(envOr("CHATGPT2API_BASE_URL", cleanString(c.Raw["base_url"]))), "/")
 	c.Proxy = strings.TrimSpace(envOr("CHATGPT2API_PROXY", cleanString(c.Raw["proxy"])))
 }

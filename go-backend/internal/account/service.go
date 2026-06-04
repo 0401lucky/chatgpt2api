@@ -48,6 +48,8 @@ type Service struct {
 	index                   int
 	imageReservations       map[string]int
 	imageAccountConcurrency int
+	autoRemoveInvalid       bool
+	autoRemoveRateLimited   bool
 	refreshJobs             map[string]*RefreshJob
 	relogin                 PasswordReloginProvider
 	reloginJobs             map[string]*RefreshJob
@@ -101,6 +103,13 @@ func (s *Service) SetPasswordReloginProvider(provider PasswordReloginProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.relogin = provider
+}
+
+func (s *Service) SetAutoRemoveOptions(invalidAccounts, rateLimitedAccounts bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.autoRemoveInvalid = invalidAccounts
+	s.autoRemoveRateLimited = rateLimitedAccounts
 }
 
 func (s *Service) ListAccounts() []map[string]any {
@@ -300,6 +309,17 @@ func (s *Service) updateAccountFieldsWithSave(accessToken string, updates map[st
 	normalized := normalizeAccount(next)
 	if normalized == nil {
 		return nil
+	}
+	if s.shouldRemoveRateLimitedLocked(normalized) {
+		public := publicAccount(normalized)
+		s.removeAccountAtLocked(index, accessToken)
+		if save {
+			_ = s.saveLocked()
+		}
+		if public != nil {
+			public["removed"] = true
+		}
+		return public
 	}
 	s.items[index] = normalized
 	if save {
@@ -523,7 +543,7 @@ func (s *Service) refreshCleanedAccounts(ctx context.Context, cleaned []string, 
 		var errorItem map[string]string
 		if result.err != nil {
 			if isInvalidTokenRefreshError(result.err) {
-				if s.updateAccountFieldsWithSave(finalToken, map[string]any{"status": "异常", "quota": 0}, false, false) != nil {
+				if s.markInvalidTokenWithSave(finalToken, false) != nil {
 					dirtyUpdates++
 				}
 			}
@@ -786,12 +806,25 @@ func (s *Service) MarkImageResult(accessToken string, success bool) map[string]a
 	if normalized == nil {
 		return nil
 	}
+	if s.shouldRemoveRateLimitedLocked(normalized) {
+		public := publicAccount(normalized)
+		s.removeAccountAtLocked(index, accessToken)
+		_ = s.saveLocked()
+		if public != nil {
+			public["removed"] = true
+		}
+		return public
+	}
 	s.items[index] = normalized
 	_ = s.saveLocked()
 	return publicAccount(normalized)
 }
 
 func (s *Service) MarkInvalidToken(accessToken string) map[string]any {
+	return s.markInvalidTokenWithSave(accessToken, true)
+}
+
+func (s *Service) markInvalidTokenWithSave(accessToken string, save bool) map[string]any {
 	accessToken = clean(accessToken)
 	if accessToken == "" {
 		return nil
@@ -802,6 +835,19 @@ func (s *Service) MarkInvalidToken(accessToken string) map[string]any {
 	if index < 0 {
 		return nil
 	}
+	if s.autoRemoveInvalid {
+		public := publicAccount(s.items[index])
+		s.removeAccountAtLocked(index, accessToken)
+		if save {
+			_ = s.saveLocked()
+		}
+		if public != nil {
+			public["status"] = "异常"
+			public["quota"] = 0
+			public["removed"] = true
+		}
+		return public
+	}
 	next := copyMap(s.items[index])
 	next["status"] = "异常"
 	next["quota"] = 0
@@ -811,8 +857,28 @@ func (s *Service) MarkInvalidToken(accessToken string) map[string]any {
 	}
 	s.items[index] = normalized
 	delete(s.imageReservations, accessToken)
-	_ = s.saveLocked()
+	if save {
+		_ = s.saveLocked()
+	}
 	return publicAccount(normalized)
+}
+
+func (s *Service) shouldRemoveRateLimitedLocked(item map[string]any) bool {
+	return s.autoRemoveRateLimited && clean(item["status"]) == "限流"
+}
+
+func (s *Service) removeAccountAtLocked(index int, accessToken string) {
+	if index < 0 || index >= len(s.items) {
+		return
+	}
+	next := append(s.items[:index], s.items[index+1:]...)
+	s.items = next
+	delete(s.imageReservations, accessToken)
+	if len(s.items) == 0 {
+		s.index = 0
+		return
+	}
+	s.index %= len(s.items)
 }
 
 func (s *Service) releaseImageToken(token string) {

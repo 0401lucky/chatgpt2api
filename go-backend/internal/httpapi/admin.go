@@ -31,6 +31,7 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeDetailError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		a.accounts.SetAutoRemoveOptions(a.config.AutoRemoveInvalidAccounts, a.config.AutoRemoveRateLimitedAccounts)
 		writeJSON(w, http.StatusOK, map[string]any{"config": config})
 	default:
 		writeMethodNotAllowed(w)

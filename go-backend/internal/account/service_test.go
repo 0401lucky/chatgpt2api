@@ -127,6 +127,44 @@ func TestMarkInvalidTokenMarksAbnormal(t *testing.T) {
 	}
 }
 
+func TestMarkInvalidTokenAutoRemovesAccount(t *testing.T) {
+	service := newTestService(t, 3)
+	const token = "secret-token-alpha-1234567890"
+	service.AddAccounts([]string{token})
+	service.UpdateAccount(token, map[string]any{"quota": 5, "status": "正常", "type": "Plus"})
+	service.SetAutoRemoveOptions(true, false)
+
+	item := service.MarkInvalidToken(token)
+	if item == nil || item["removed"] != true {
+		t.Fatalf("invalid token should be removed, item = %#v", item)
+	}
+	if got := len(service.ListAccounts()); got != 0 {
+		t.Fatalf("remaining accounts = %d", got)
+	}
+	if _, err := service.GetAvailableAccessTokenFor(context.Background(), nil); err == nil {
+		t.Fatal("removed account should not be available")
+	}
+}
+
+func TestMarkImageResultAutoRemovesRateLimitedAccount(t *testing.T) {
+	service := newTestService(t, 3)
+	const token = "secret-token-alpha-1234567890"
+	service.AddAccounts([]string{token})
+	service.UpdateAccount(token, map[string]any{"quota": 1, "status": "正常", "type": "Plus"})
+	service.SetAutoRemoveOptions(false, true)
+
+	item := service.MarkImageResult(token, true)
+	if item == nil || item["removed"] != true {
+		t.Fatalf("rate limited account should be removed, item = %#v", item)
+	}
+	if got := len(service.ListAccounts()); got != 0 {
+		t.Fatalf("remaining accounts = %d", got)
+	}
+	if _, _, err := service.AcquireImageToken(context.Background(), nil); err == nil {
+		t.Fatal("removed account should not be available for images")
+	}
+}
+
 func TestIsInvalidTokenErrorAcceptsRuntime401(t *testing.T) {
 	cases := []error{
 		fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),

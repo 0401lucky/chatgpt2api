@@ -26,6 +26,7 @@ type App struct {
 	auth     *auth.Service
 	models   ModelLister
 	chat     ConversationStreamer
+	search   Searcher
 	image    ImageGenerator
 	tasks    *imagetask.Service
 	local    *localdata.Services
@@ -40,6 +41,10 @@ type ModelLister interface {
 
 type ConversationStreamer interface {
 	StreamConversation(ctx context.Context, accessToken string, messages []map[string]any, model, prompt string) (<-chan string, <-chan error)
+}
+
+type Searcher interface {
+	Search(ctx context.Context, accessToken, prompt, model string) (map[string]any, error)
 }
 
 type ImageGenerator interface {
@@ -64,6 +69,9 @@ func New(cfg *config.Config, accounts *account.Service, authService *auth.Servic
 	accounts.SetAutoRemoveOptions(cfg.AutoRemoveInvalidAccounts, cfg.AutoRemoveRateLimitedAccounts)
 	if chat, ok := models.(ConversationStreamer); ok {
 		app.chat = chat
+	}
+	if searcher, ok := models.(Searcher); ok {
+		app.search = searcher
 	}
 	if imageGenerator, ok := models.(ImageGenerator); ok {
 		app.image = imageGenerator
@@ -140,6 +148,7 @@ func (a *App) routes() {
 	a.mux.HandleFunc("/api/creation-tasks/image-edits", a.handleImageTaskEdits)
 	a.mux.HandleFunc("/v1/models", a.handleModels)
 	a.mux.HandleFunc("/v1/chat/completions", a.handleChatCompletions)
+	a.mux.HandleFunc("/v1/search", a.handleSearch)
 	a.mux.HandleFunc("/v1/responses", a.handleResponses)
 	a.mux.HandleFunc("/v1/messages", a.handleMessages)
 	a.mux.HandleFunc("/v1/images/generations", a.handleImagesGenerations)
@@ -505,6 +514,58 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+	if _, ok := a.requireIdentity(w, r); !ok {
+		return
+	}
+	if a.search == nil {
+		writeOpenAIError(w, http.StatusNotImplemented, "server_error", "search upstream is not configured")
+		return
+	}
+	var body struct {
+		Prompt string `json:"prompt"`
+		Model  string `json:"model"`
+	}
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
+	prompt := strings.TrimSpace(body.Prompt)
+	if prompt == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "prompt is required")
+		return
+	}
+	model := strings.TrimSpace(body.Model)
+	if model == "" {
+		model = protocol.SearchModel
+	}
+	token, err := a.accounts.GetAvailableAccessTokenFor(r.Context(), nil)
+	if err != nil {
+		writeOpenAIError(w, http.StatusServiceUnavailable, "no_available_account", err.Error())
+		return
+	}
+	accountInfo := a.accounts.GetAccount(token)
+	result, err := a.search.Search(r.Context(), token, prompt, model)
+	if err != nil {
+		if account.IsInvalidTokenError(err) {
+			a.accounts.MarkInvalidToken(token)
+		}
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return
+	}
+	if result == nil {
+		result = map[string]any{}
+	}
+	if email := cleanResponseString(accountInfo["email"]); email != "" {
+		result["_account_email"] = email
+	}
+	a.logEvent("call", "搜索成功", map[string]any{"model": model})
 	writeJSON(w, http.StatusOK, result)
 }
 

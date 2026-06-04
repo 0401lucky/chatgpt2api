@@ -63,6 +63,9 @@ func ClearTextChatCacheForTest() {
 }
 
 func cachedTextChatCompletion(ctx context.Context, body map[string]any, messages []map[string]any, compute func() (map[string]any, error)) (map[string]any, error) {
+	if IsSearchModel(clean(body["model"])) {
+		return compute()
+	}
 	if MessagesHaveImage(messages) {
 		return compute()
 	}

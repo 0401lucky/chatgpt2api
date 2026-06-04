@@ -13,6 +13,12 @@ type ConversationStreamer interface {
 	StreamConversation(ctx context.Context, accessToken string, messages []map[string]any, model, prompt string) (<-chan string, <-chan error)
 }
 
+type Searcher interface {
+	Search(ctx context.Context, accessToken, prompt, model string) (map[string]any, error)
+}
+
+const SearchModel = "gpt-5-5"
+
 type ConversationState struct {
 	Text           string
 	ConversationID string
@@ -96,6 +102,33 @@ func StreamTextDeltas(ctx context.Context, streamer ConversationStreamer, access
 	go func() {
 		defer close(out)
 		defer close(errOut)
+		if IsSearchModel(model) {
+			searcher, ok := streamer.(Searcher)
+			if !ok {
+				errOut <- fmt.Errorf("search upstream is not configured")
+				return
+			}
+			prompt := SearchPromptFromMessages(messages)
+			if prompt == "" {
+				errOut <- fmt.Errorf("search prompt is required")
+				return
+			}
+			result, err := searcher.Search(ctx, accessToken, prompt, model)
+			if err != nil {
+				errOut <- err
+				return
+			}
+			if answer := SearchAnswer(result); answer != "" {
+				select {
+				case out <- answer:
+				case <-ctx.Done():
+					errOut <- ctx.Err()
+					return
+				}
+			}
+			errOut <- nil
+			return
+		}
 		payloads, upstreamErr := streamer.StreamConversation(ctx, accessToken, messages, model, "")
 		iterErr := IterConversationPayloads(ctx, payloads, AssistantHistoryText(messages), AssistantHistoryMessages(messages), func(event map[string]any) error {
 			if event["type"] != "conversation.delta" {
@@ -129,6 +162,44 @@ func TextChatParts(body map[string]any) (string, []map[string]any, error) {
 		return "", nil, err
 	}
 	return model, NormalizeMessages(messages), nil
+}
+
+func IsSearchModel(model string) bool {
+	return strings.EqualFold(strings.TrimSpace(model), SearchModel)
+}
+
+func SearchPromptFromMessages(messages []map[string]any) string {
+	fallback := ""
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		text := strings.TrimSpace(MessageText(message["content"]))
+		if text == "" {
+			continue
+		}
+		role := strings.ToLower(clean(message["role"]))
+		if role == "user" {
+			return text
+		}
+		if fallback == "" && role != "assistant" {
+			fallback = text
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	for index := len(messages) - 1; index >= 0; index-- {
+		if text := strings.TrimSpace(MessageText(messages[index]["content"])); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func SearchAnswer(result map[string]any) string {
+	if result == nil {
+		return ""
+	}
+	return clean(result["answer"])
 }
 
 func ChatMessagesFromBody(body map[string]any) ([]map[string]any, error) {

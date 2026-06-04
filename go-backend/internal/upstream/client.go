@@ -615,7 +615,7 @@ func modelItem(id string, created int, ownedBy string) map[string]any {
 }
 
 func localModelIDs() []string {
-	return []string{"auto", "gpt-5", "gpt-5-1", "gpt-5-2", "gpt-5-3", "gpt-5-3-mini", "gpt-5-mini", "gpt-image-2", "codex-gpt-image-2"}
+	return []string{"auto", "gpt-5", "gpt-5-1", "gpt-5-2", "gpt-5-3", "gpt-5-3-mini", "gpt-5-mini", "gpt-5-5", "gpt-image-2", "codex-gpt-image-2"}
 }
 
 func anyList(value any) []any {

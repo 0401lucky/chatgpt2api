@@ -64,6 +64,31 @@ func TestChatCompletionDoesNotCacheImageInput(t *testing.T) {
 	}
 }
 
+func TestChatCompletionSearchModelUsesSearchBackend(t *testing.T) {
+	ClearTextChatCacheForTest()
+	streamer := &searchCountingStreamer{}
+	body := map[string]any{
+		"model": SearchModel,
+		"messages": []any{
+			map[string]any{"role": "system", "content": "保持简洁"},
+			map[string]any{"role": "user", "content": "今天有什么消息"},
+		},
+	}
+	result, err := ChatCompletion(context.Background(), streamer, "token", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := firstChoiceContent(result); got != "搜索答案" {
+		t.Fatalf("content = %#v", got)
+	}
+	if streamer.searches != 1 || streamer.calls != 0 {
+		t.Fatalf("searches=%d stream calls=%d", streamer.searches, streamer.calls)
+	}
+	if streamer.prompt != "今天有什么消息" {
+		t.Fatalf("prompt = %q", streamer.prompt)
+	}
+}
+
 func firstChoiceContent(result map[string]any) any {
 	switch choices := result["choices"].(type) {
 	case []map[string]any:
@@ -74,6 +99,18 @@ func firstChoiceContent(result map[string]any) any {
 	default:
 		return nil
 	}
+}
+
+type searchCountingStreamer struct {
+	countingStreamer
+	searches int
+	prompt   string
+}
+
+func (s *searchCountingStreamer) Search(ctx context.Context, accessToken, prompt, model string) (map[string]any, error) {
+	s.searches++
+	s.prompt = prompt
+	return map[string]any{"answer": "搜索答案"}, nil
 }
 
 type countingStreamer struct {

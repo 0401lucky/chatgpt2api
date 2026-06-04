@@ -43,7 +43,7 @@ func TestListModels(t *testing.T) {
 	for _, item := range data {
 		seen[item["id"].(string)] = true
 	}
-	if !seen["gpt-5"] || !seen["gpt-image-2"] || !seen["codex-gpt-image-2"] {
+	if !seen["gpt-5"] || !seen["gpt-5-5"] || !seen["gpt-image-2"] || !seen["codex-gpt-image-2"] {
 		t.Fatalf("models missing expected ids: %#v", data)
 	}
 }

@@ -693,6 +693,61 @@ func TestChatCompletion401MarksAccountAbnormal(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsGPT55UsesSearch(t *testing.T) {
+	backend := &fakeSearchBackend{}
+	app, _ := newTestAppWithModels(t, backend)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{
+		"model": "gpt-5-5",
+		"messages": [{"role": "user", "content": "查一下今天的消息"}]
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	choices := body["choices"].([]any)
+	message := choices[0].(map[string]any)["message"].(map[string]any)
+	if message["content"] != "搜索答案" {
+		t.Fatalf("body = %#v", body)
+	}
+	if backend.searches != 1 || backend.streams != 0 {
+		t.Fatalf("searches=%d streams=%d", backend.searches, backend.streams)
+	}
+	if backend.prompt != "查一下今天的消息" {
+		t.Fatalf("prompt = %q", backend.prompt)
+	}
+}
+
+func TestSearchEndpointUsesAccountPool(t *testing.T) {
+	backend := &fakeSearchBackend{}
+	app, accounts := newTestAppWithModels(t, backend)
+	accounts.UpdateAccount("token-alpha-1234567890", map[string]any{"email": "user@example.test"})
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/search", bytes.NewReader([]byte(`{"prompt":"查一下今天的消息"}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["answer"] != "搜索答案" || body["_account_email"] != "user@example.test" {
+		t.Fatalf("body = %#v", body)
+	}
+	if backend.token != "token-alpha-1234567890" || backend.model != protocol.SearchModel {
+		t.Fatalf("token=%q model=%q", backend.token, backend.model)
+	}
+}
+
 type fakeChatBackend struct {
 	fakeModelLister
 }
@@ -707,6 +762,28 @@ func (fakeChatBackend) StreamConversation(ctx context.Context, accessToken strin
 	errCh <- nil
 	close(errCh)
 	return out, errCh
+}
+
+type fakeSearchBackend struct {
+	fakeModelLister
+	searches int
+	streams  int
+	token    string
+	model    string
+	prompt   string
+}
+
+func (f *fakeSearchBackend) StreamConversation(ctx context.Context, accessToken string, messages []map[string]any, model, prompt string) (<-chan string, <-chan error) {
+	f.streams++
+	return fakeChatBackend{}.StreamConversation(ctx, accessToken, messages, model, prompt)
+}
+
+func (f *fakeSearchBackend) Search(ctx context.Context, accessToken, prompt, model string) (map[string]any, error) {
+	f.searches++
+	f.token = accessToken
+	f.model = model
+	f.prompt = prompt
+	return map[string]any{"answer": "搜索答案", "conversation_id": "conv-search", "sources": []map[string]string{}}, nil
 }
 
 type failingChatBackend struct {

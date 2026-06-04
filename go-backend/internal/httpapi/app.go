@@ -60,6 +60,7 @@ func New(cfg *config.Config, accounts *account.Service, authService *auth.Servic
 		mux:      http.NewServeMux(),
 		started:  time.Now(),
 	}
+	accounts.SetPasswordReloginProvider(app.register)
 	if chat, ok := models.(ConversationStreamer); ok {
 		app.chat = chat
 	}
@@ -95,6 +96,9 @@ func (a *App) routes() {
 	a.mux.HandleFunc("/api/accounts", a.handleAccounts)
 	a.mux.HandleFunc("/api/accounts/refresh", a.handleAccountsRefresh)
 	a.mux.HandleFunc("/api/accounts/refresh/jobs/", a.handleAccountRefreshJob)
+	a.mux.HandleFunc("/api/accounts/re-login/progress/", a.handleAccountReloginJob)
+	a.mux.HandleFunc("/api/accounts/re-login/jobs/", a.handleAccountReloginJob)
+	a.mux.HandleFunc("/api/accounts/re-login", a.handleAccountsRelogin)
 	a.mux.HandleFunc("/api/accounts/update", a.handleAccountsUpdate)
 	a.mux.HandleFunc("/api/auth/users/", a.handleUserKeyItem)
 	a.mux.HandleFunc("/api/auth/users", a.handleUserKeys)
@@ -324,6 +328,62 @@ func (a *App) handleAccountRefreshJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"job": job, "items": a.accounts.ListAccounts()})
 }
 
+func (a *App) handleAccountsRelogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+	if _, ok := a.requireAdmin(w, r); !ok {
+		return
+	}
+	var body struct {
+		AccessTokens []string `json:"access_tokens"`
+		AccountIDs   []string `json:"account_ids"`
+	}
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
+	tokens := cleanStrings(body.AccessTokens)
+	if len(tokens) == 0 {
+		tokens = a.accounts.ListTokensByIDs(cleanStrings(body.AccountIDs))
+	}
+	if len(tokens) == 0 {
+		writeDetailError(w, http.StatusBadRequest, "access_tokens or account_ids is required")
+		return
+	}
+	job, err := a.accounts.StartReloginJob(tokens)
+	if err != nil {
+		writeDetailError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	a.logEvent("account", "开始账号密码重登", map[string]any{"requested": job["requested"], "job_id": job["id"]})
+	writeJSON(w, http.StatusOK, map[string]any{"job": job, "progress_id": job["id"], "items": a.accounts.ListAccounts()})
+}
+
+func (a *App) handleAccountReloginJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+	if _, ok := a.requireAdmin(w, r); !ok {
+		return
+	}
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/accounts/re-login/jobs/"), "/")
+	if strings.HasPrefix(r.URL.Path, "/api/accounts/re-login/progress/") {
+		id = strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/accounts/re-login/progress/"), "/")
+	}
+	if id == "" {
+		writeDetailError(w, http.StatusBadRequest, "job id is required")
+		return
+	}
+	job := a.accounts.GetReloginJob(id)
+	if job == nil {
+		writeDetailError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"job": job, "items": a.accounts.ListAccounts()})
+}
+
 func (a *App) handleAccountsUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeMethodNotAllowed(w)
@@ -333,11 +393,15 @@ func (a *App) handleAccountsUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		AccessToken string  `json:"access_token"`
-		AccountID   string  `json:"account_id"`
-		Type        *string `json:"type"`
-		Status      *string `json:"status"`
-		Quota       *int    `json:"quota"`
+		AccessToken  string  `json:"access_token"`
+		AccountID    string  `json:"account_id"`
+		Type         *string `json:"type"`
+		Status       *string `json:"status"`
+		Quota        *int    `json:"quota"`
+		Email        *string `json:"email"`
+		Password     *string `json:"password"`
+		RefreshToken *string `json:"refresh_token"`
+		SourceType   *string `json:"source_type"`
 	}
 	if !decodeJSONBody(w, r, &body) {
 		return
@@ -357,6 +421,18 @@ func (a *App) handleAccountsUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Quota != nil {
 		updates["quota"] = *body.Quota
+	}
+	if body.Email != nil {
+		updates["email"] = *body.Email
+	}
+	if body.Password != nil {
+		updates["password"] = *body.Password
+	}
+	if body.RefreshToken != nil {
+		updates["refresh_token"] = *body.RefreshToken
+	}
+	if body.SourceType != nil {
+		updates["source_type"] = *body.SourceType
 	}
 	if len(updates) == 0 {
 		writeDetailError(w, http.StatusBadRequest, "还没有检测到改动，请修改后再保存")
@@ -550,20 +626,30 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(body.ResponseFormat) == "" {
 		body.ResponseFormat = "b64_json"
 	}
-	data := make([]map[string]any, 0, body.N)
-	for i := 0; i < body.N; i++ {
-		items, err := protocol.GenerateImageWithPool(r.Context(), a.image, a.accounts, body.Prompt, body.Model, body.Size, body.ResponseFormat)
-		if err != nil {
-			if isNoAvailableImageAccountError(err) {
-				a.logEvent("call", "图片生成失败：无可用账号", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
-				writeOpenAIError(w, http.StatusServiceUnavailable, "no_available_account", err.Error())
-				return
-			}
-			a.logEvent("call", "图片生成失败", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
-			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+	data, errorsOut := a.generateImagesWithPool(r.Context(), body.Prompt, body.Model, body.Size, body.ResponseFormat, body.N)
+	if len(data) == 0 && len(errorsOut) > 0 {
+		err := errorsOut[0]
+		if isNoAvailableImageAccountError(err) {
+			a.logEvent("call", "图片生成失败：无可用账号", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
+			writeOpenAIError(w, http.StatusServiceUnavailable, "no_available_account", err.Error())
 			return
 		}
-		data = append(data, items...)
+		a.logEvent("call", "图片生成失败", map[string]any{"model": body.Model, "size": body.Size, "error": err.Error()})
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+		return
+	}
+	if len(data) == 0 {
+		a.logEvent("call", "图片生成失败", map[string]any{"model": body.Model, "size": body.Size, "error": "image generation failed"})
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "image generation failed")
+		return
+	}
+	if len(errorsOut) > 0 {
+		a.logEvent("call", "图片生成部分失败", map[string]any{
+			"model":  body.Model,
+			"size":   body.Size,
+			"count":  len(data),
+			"errors": errorMessages(errorsOut),
+		})
 	}
 	a.local.Images().SaveHistoryRecord("/v1/images/generations", "generate", body.Model, body.Prompt, data, map[string]any{
 		"input_tokens":  0,
@@ -575,6 +661,46 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 		"created": time.Now().Unix(),
 		"data":    data,
 	})
+}
+
+type imageGenerationAttempt struct {
+	Index int
+	Data  []map[string]any
+	Err   error
+}
+
+func (a *App) generateImagesWithPool(ctx context.Context, prompt, model, size, responseFormat string, count int) ([]map[string]any, []error) {
+	if count <= 1 {
+		data, err := protocol.GenerateImageWithPool(ctx, a.image, a.accounts, prompt, model, size, responseFormat)
+		if err != nil {
+			return nil, []error{err}
+		}
+		return data, nil
+	}
+	results := make(chan imageGenerationAttempt, count)
+	for index := 0; index < count; index++ {
+		go func(index int) {
+			data, err := protocol.GenerateImageWithPool(ctx, a.image, a.accounts, prompt, model, size, responseFormat)
+			results <- imageGenerationAttempt{Index: index, Data: data, Err: err}
+		}(index)
+	}
+
+	ordered := make([]imageGenerationAttempt, count)
+	for index := 0; index < count; index++ {
+		result := <-results
+		ordered[result.Index] = result
+	}
+
+	data := make([]map[string]any, 0, count)
+	errorsOut := []error{}
+	for _, result := range ordered {
+		if result.Err != nil {
+			errorsOut = append(errorsOut, result.Err)
+			continue
+		}
+		data = append(data, result.Data...)
+	}
+	return data, errorsOut
 }
 
 func (a *App) handleImagesEdits(w http.ResponseWriter, r *http.Request) {
@@ -793,6 +919,16 @@ func isNoAvailableImageAccountError(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "no available image quota") || strings.Contains(text, "no available account")
+}
+
+func errorMessages(errorsOut []error) []string {
+	messages := make([]string, 0, len(errorsOut))
+	for _, err := range errorsOut {
+		if err != nil {
+			messages = append(messages, err.Error())
+		}
+	}
+	return messages
 }
 
 func openAIErrorPayload(errorType, message string) map[string]any {

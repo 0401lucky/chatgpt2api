@@ -4,12 +4,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	urlpkg "net/url"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"chatgpt2api-go-backend/internal/protocol"
 )
 
 type ChatRequirements struct {
@@ -47,7 +52,11 @@ func (c *Client) StreamConversation(ctx context.Context, messages []map[string]a
 			return
 		}
 		path, timezoneName := c.chatTarget()
-		payload := c.conversationPayload(messages, model, timezoneName)
+		payload, err := c.conversationPayload(ctx, messages, model, timezoneName)
+		if err != nil {
+			errCh <- err
+			return
+		}
 		resp, err := c.postJSONStream(ctx, path, payload, c.conversationHeaders(path, requirements))
 		if err != nil {
 			errCh <- err
@@ -170,14 +179,18 @@ func (c *Client) chatTarget() (string, string) {
 	return "/backend-anon/conversation", "America/Los_Angeles"
 }
 
-func (c *Client) conversationPayload(messages []map[string]any, model, timezoneName string) map[string]any {
+func (c *Client) conversationPayload(ctx context.Context, messages []map[string]any, model, timezoneName string) (map[string]any, error) {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		model = "auto"
 	}
+	converted, err := c.apiMessagesToConversationMessages(ctx, messages)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"action":                        "next",
-		"messages":                      c.apiMessagesToConversationMessages(messages),
+		"messages":                      converted,
 		"model":                         model,
 		"parent_message_id":             newUUID(),
 		"conversation_mode":             map[string]any{"kind": "primary_assistant"},
@@ -207,30 +220,39 @@ func (c *Client) conversationPayload(messages []map[string]any, model, timezoneN
 			"current_time":        time.Now().Format(time.RFC3339),
 			"timezone_offset_min": -480,
 		},
-	}
+	}, nil
 }
 
-func (c *Client) apiMessagesToConversationMessages(messages []map[string]any) []map[string]any {
+func (c *Client) apiMessagesToConversationMessages(ctx context.Context, messages []map[string]any) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(messages))
 	for _, item := range messages {
 		role := firstNonEmpty(cleanString(item["role"]), "user")
 		text := messageContentText(item["content"])
-		if strings.TrimSpace(text) == "" {
+		images, err := c.messageContentImages(ctx, item["content"])
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(text) == "" && len(images) == 0 {
 			continue
 		}
-		out = append(out, map[string]any{
-			"id":          newUUID(),
-			"author":      map[string]any{"role": role},
-			"create_time": float64(time.Now().UnixNano()) / 1e9,
-			"content":     map[string]any{"content_type": "text", "parts": []any{text}},
-			"metadata": map[string]any{
-				"selected_github_repos":     []any{},
-				"selected_all_github_repos": false,
-				"serialization_metadata":    map[string]any{"custom_symbol_offsets": []any{}},
-			},
-		})
+		if len(images) == 0 {
+			out = append(out, textConversationMessage(role, text))
+			continue
+		}
+		if c.AccessToken == "" {
+			return nil, fmt.Errorf("authenticated upstream account required for image input")
+		}
+		refs := make([]map[string]any, 0, len(images))
+		for index, input := range images {
+			ref, err := c.uploadImage(ctx, input, index+1)
+			if err != nil {
+				return nil, err
+			}
+			refs = append(refs, ref)
+		}
+		out = append(out, multimodalConversationMessage(role, text, refs))
 	}
-	return out
+	return out, nil
 }
 
 func messageContentText(content any) string {
@@ -254,6 +276,164 @@ func messageContentText(content any) string {
 	default:
 		return cleanString(content)
 	}
+}
+
+func (c *Client) messageContentImages(ctx context.Context, content any) ([]protocol.ImageInput, error) {
+	inputs := []protocol.ImageInput{}
+	for _, raw := range anyList(content) {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		partType := strings.ToLower(cleanString(item["type"]))
+		if partType != "image_url" && partType != "input_image" && partType != "image" {
+			continue
+		}
+		input, err := c.imageInputFromContentPart(ctx, item, len(inputs)+1)
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, input)
+	}
+	return inputs, nil
+}
+
+func (c *Client) imageInputFromContentPart(ctx context.Context, item map[string]any, index int) (protocol.ImageInput, error) {
+	mimeType := firstNonEmpty(cleanString(item["mime_type"]), cleanString(item["mime"]))
+	fileName := firstNonEmpty(cleanString(item["file_name"]), cleanString(item["filename"]))
+	imageURL := imageURLFromPart(item)
+	if strings.ToLower(cleanString(item["type"])) == "image" {
+		if data := cleanString(item["data"]); data != "" {
+			imageURL = data
+		}
+	}
+	if imageURL == "" {
+		return protocol.ImageInput{}, fmt.Errorf("image input is missing image_url or data")
+	}
+	if strings.HasPrefix(strings.ToLower(imageURL), "data:") {
+		raw, mime, err := decodeDataImageURL(imageURL)
+		if err != nil {
+			return protocol.ImageInput{}, err
+		}
+		mimeType = firstNonEmpty(mimeType, mime)
+		if fileName == "" {
+			fileName = fmt.Sprintf("image_%d%s", index, imageExtensionFromMime(mimeType, raw))
+		}
+		return protocol.ImageInput{Data: raw, FileName: fileName, MimeType: mimeType}, nil
+	}
+	if raw, err := base64.StdEncoding.DecodeString(imageURL); err == nil && len(raw) > 0 {
+		if fileName == "" {
+			fileName = fmt.Sprintf("image_%d%s", index, imageExtensionFromMime(mimeType, raw))
+		}
+		return protocol.ImageInput{Data: raw, FileName: fileName, MimeType: mimeType}, nil
+	}
+	raw, err := c.downloadImageBytes(ctx, imageURL)
+	if err != nil {
+		return protocol.ImageInput{}, err
+	}
+	if fileName == "" {
+		fileName = imageFileNameFromURL(imageURL, index, mimeType, raw)
+	}
+	return protocol.ImageInput{Data: raw, FileName: fileName, MimeType: mimeType}, nil
+}
+
+func imageURLFromPart(item map[string]any) string {
+	if nested, ok := item["image_url"].(map[string]any); ok {
+		return firstNonEmpty(cleanString(nested["url"]), cleanString(nested["data"]))
+	}
+	if value := cleanString(item["image_url"]); value != "" {
+		return value
+	}
+	if value := cleanString(item["url"]); value != "" {
+		return value
+	}
+	return ""
+}
+
+func decodeDataImageURL(value string) ([]byte, string, error) {
+	parts := strings.SplitN(value, ",", 2)
+	if len(parts) != 2 {
+		return nil, "", fmt.Errorf("invalid data image url")
+	}
+	meta := strings.TrimPrefix(parts[0], "data:")
+	mimeType := strings.Split(meta, ";")[0]
+	if strings.Contains(strings.ToLower(meta), ";base64") {
+		raw, err := base64.StdEncoding.DecodeString(parts[1])
+		return raw, mimeType, err
+	}
+	text, err := urlpkg.PathUnescape(parts[1])
+	if err != nil {
+		return nil, "", err
+	}
+	return []byte(text), mimeType, nil
+}
+
+func imageFileNameFromURL(value string, index int, mimeType string, raw []byte) string {
+	parsed, err := urlpkg.Parse(value)
+	if err == nil {
+		base := strings.TrimSpace(filepath.Base(parsed.Path))
+		if base != "" && base != "." && base != "/" {
+			return base
+		}
+	}
+	return fmt.Sprintf("image_%d%s", index, imageExtensionFromMime(mimeType, raw))
+}
+
+func textConversationMessage(role, text string) map[string]any {
+	return map[string]any{
+		"id":          newUUID(),
+		"author":      map[string]any{"role": role},
+		"create_time": float64(time.Now().UnixNano()) / 1e9,
+		"content":     map[string]any{"content_type": "text", "parts": []any{text}},
+		"metadata":    conversationMessageMetadata(nil),
+	}
+}
+
+func multimodalConversationMessage(role, text string, references []map[string]any) map[string]any {
+	parts := make([]any, 0, len(references)+1)
+	for _, item := range references {
+		parts = append(parts, map[string]any{
+			"content_type":  "image_asset_pointer",
+			"asset_pointer": "file-service://" + cleanString(item["file_id"]),
+			"width":         item["width"],
+			"height":        item["height"],
+			"size_bytes":    item["file_size"],
+		})
+	}
+	if strings.TrimSpace(text) != "" {
+		parts = append(parts, text)
+	}
+	return map[string]any{
+		"id":          newUUID(),
+		"author":      map[string]any{"role": role},
+		"create_time": float64(time.Now().UnixNano()) / 1e9,
+		"content":     map[string]any{"content_type": "multimodal_text", "parts": parts},
+		"metadata":    conversationMessageMetadata(references),
+	}
+}
+
+func conversationMessageMetadata(references []map[string]any) map[string]any {
+	metadata := map[string]any{
+		"selected_github_repos":     []any{},
+		"selected_all_github_repos": false,
+		"serialization_metadata":    map[string]any{"custom_symbol_offsets": []any{}},
+	}
+	if len(references) == 0 {
+		return metadata
+	}
+	attachments := make([]map[string]any, 0, len(references))
+	for _, item := range references {
+		attachments = append(attachments, map[string]any{
+			"id":       item["file_id"],
+			"mimeType": item["mime_type"],
+			"name":     item["file_name"],
+			"size":     item["file_size"],
+			"width":    item["width"],
+			"height":   item["height"],
+		})
+	}
+	metadata["attachments"] = attachments
+	return metadata
 }
 
 func (c *Client) conversationHeaders(path string, requirements ChatRequirements) map[string]string {

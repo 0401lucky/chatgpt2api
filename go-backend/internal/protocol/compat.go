@@ -12,19 +12,21 @@ import (
 func Response(body map[string]any, chat ConversationStreamer, image ImageGenerator, accounts ImageAccountPool) (map[string]any, error) {
 	model := firstNonEmpty(clean(body["model"]), "auto")
 	prompt := responsePrompt(body["input"], body["instructions"])
-	if prompt == "" {
-		return nil, fmt.Errorf("input text is required")
-	}
 	id := "resp_" + newHex(32)
 	created := time.Now().Unix()
-	if hasImageTool(body["tools"]) {
+	if tool := imageTool(body["tools"]); len(tool) > 0 {
+		if prompt == "" {
+			return nil, fmt.Errorf("input text is required")
+		}
 		if image == nil || accounts == nil {
 			return nil, fmt.Errorf("image generation upstream is not configured")
 		}
 		if model == "auto" {
 			model = "gpt-image-2"
 		}
-		data, err := GenerateImageWithPool(context.Background(), image, accounts, prompt, model, "1:1", "b64_json")
+		size := firstNonEmpty(clean(tool["size"]), "1:1")
+		finalPrompt := promptWithImageQuality(prompt, clean(tool["quality"]))
+		data, err := GenerateImageWithPool(context.Background(), image, accounts, finalPrompt, model, size, "b64_json")
 		if err != nil {
 			return nil, err
 		}
@@ -54,7 +56,10 @@ func Response(body map[string]any, chat ConversationStreamer, image ImageGenerat
 	if chat == nil || accounts == nil {
 		return nil, fmt.Errorf("chat completions upstream is not configured")
 	}
-	messages := []map[string]any{{"role": "user", "content": prompt}}
+	messages := responseMessages(body["input"], body["instructions"])
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("input text is required")
+	}
 	token, err := accounts.GetAvailableAccessTokenFor(context.Background(), nil)
 	if err != nil {
 		return nil, err
@@ -156,12 +161,64 @@ func responsePrompt(input any, instructions any) string {
 	return strings.TrimSpace(strings.Join(parts, "\n\n"))
 }
 
+func responseMessages(input any, instructions any) []map[string]any {
+	messages := []map[string]any{}
+	if text := strings.TrimSpace(clean(instructions)); text != "" {
+		messages = append(messages, map[string]any{"role": "system", "content": text})
+	}
+	switch value := input.(type) {
+	case string:
+		if strings.TrimSpace(value) != "" {
+			messages = append(messages, map[string]any{"role": "user", "content": value})
+		}
+	case map[string]any:
+		if message := responseInputMessage(value); message != nil {
+			messages = append(messages, message)
+		}
+	case []any:
+		for _, raw := range value {
+			if item, ok := raw.(map[string]any); ok {
+				if message := responseInputMessage(item); message != nil {
+					messages = append(messages, message)
+				}
+			}
+		}
+	}
+	return NormalizeMessages(messages)
+}
+
+func responseInputMessage(item map[string]any) map[string]any {
+	if len(item) == 0 {
+		return nil
+	}
+	role := firstNonEmpty(clean(item["role"]), "user")
+	if content, ok := NormalizeMessageContent(item["content"]); ok {
+		return map[string]any{"role": role, "content": content}
+	}
+	if text := MessageText([]any{item}); strings.TrimSpace(text) != "" || ContentHasImage([]any{item}) {
+		return map[string]any{"role": role, "content": []any{item}}
+	}
+	return nil
+}
+
 func hasImageTool(tools any) bool {
+	return len(imageTool(tools)) > 0
+}
+
+func imageTool(tools any) map[string]any {
 	for _, raw := range anyList(tools) {
 		item := asMap(raw)
 		if strings.EqualFold(clean(item["type"]), "image_generation") {
-			return true
+			return item
 		}
 	}
-	return false
+	return map[string]any{}
+}
+
+func promptWithImageQuality(prompt, quality string) string {
+	quality = strings.TrimSpace(quality)
+	if quality == "" || strings.EqualFold(quality, "auto") {
+		return prompt
+	}
+	return strings.TrimSpace(prompt) + "\n\n输出图片质量为 " + quality + "。"
 }

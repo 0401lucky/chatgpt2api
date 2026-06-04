@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -108,6 +109,58 @@ func TestYydsCreateMailboxTokenFieldsAndWildcard(t *testing.T) {
 	}
 }
 
+func TestGptMailCreateMailboxStoresDomain(t *testing.T) {
+	var gotPath string
+	var gotAPIKey string
+	var gotPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAPIKey = r.Header.Get("X-API-Key")
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data":    map[string]any{"email": "alice@mail.example"},
+		})
+	}))
+	defer server.Close()
+
+	provider := &gptMailProvider{baseMailProvider: baseMailProvider{
+		client: rewriteHostClient(server.URL),
+		conf:   mailSettings{RequestTimeout: time.Second, UserAgent: "test-agent"},
+		entry: map[string]any{
+			"api_key":        "secret-key",
+			"default_domain": "mail.example",
+			"provider_ref":   "gptmail#1",
+		},
+	}}
+	mailbox, err := provider.CreateMailbox(context.Background(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/api/generate-email" || gotAPIKey != "secret-key" || gotPayload["prefix"] != "alice" || gotPayload["domain"] != "mail.example" {
+		t.Fatalf("path=%q apiKey=%q payload=%#v", gotPath, gotAPIKey, gotPayload)
+	}
+	if mailbox["address"] != "alice@mail.example" || mailbox["domain"] != "mail.example" {
+		t.Fatalf("mailbox = %#v", mailbox)
+	}
+}
+
+func TestGptMailEmailsSupportsDocumentedShapes(t *testing.T) {
+	cases := []any{
+		map[string]any{"success": true, "data": map[string]any{"emails": []any{map[string]any{"id": "nested"}}}},
+		map[string]any{"success": true, "data": []any{map[string]any{"id": "list"}}},
+		map[string]any{"emails": []any{map[string]any{"id": "plain"}}},
+	}
+	for _, item := range cases {
+		items := gptMailEmails(item)
+		if len(items) != 1 || clean(items[0]["id"]) == "" {
+			t.Fatalf("emails from %#v = %#v", item, items)
+		}
+	}
+}
+
 func TestYydsMailItemsSupportsKnownShapes(t *testing.T) {
 	shapes := []map[string]any{
 		{"items": []any{map[string]any{"id": "items-id"}}},
@@ -180,4 +233,21 @@ func resetMailDomainSeq() {
 	mailDomainMu.Lock()
 	defer mailDomainMu.Unlock()
 	mailDomainSeq = 0
+}
+
+func rewriteHostClient(baseURL string) *http.Client {
+	base, _ := url.Parse(baseURL)
+	return &http.Client{Transport: rewriteHostTransport{base: base, inner: http.DefaultTransport}}
+}
+
+type rewriteHostTransport struct {
+	base  *url.URL
+	inner http.RoundTripper
+}
+
+func (t rewriteHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.URL.Scheme = t.base.Scheme
+	req.URL.Host = t.base.Host
+	return t.inner.RoundTrip(req)
 }

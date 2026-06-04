@@ -3,6 +3,7 @@ package protocol
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"chatgpt2api-go-backend/internal/account"
 )
@@ -49,6 +50,7 @@ func EditImageWithPool(ctx context.Context, image ImageGenerator, accounts Image
 
 func callImageWithPool(ctx context.Context, accounts ImageTokenPool, call func(token string) ([]map[string]any, error)) ([]map[string]any, error) {
 	tried := map[string]struct{}{}
+	var lastErr error
 	for {
 		token, release, err := accounts.AcquireImageToken(ctx, func(item map[string]any) bool {
 			candidate := clean(item["access_token"])
@@ -59,6 +61,9 @@ func callImageWithPool(ctx context.Context, accounts ImageTokenPool, call func(t
 			return !seen
 		})
 		if err != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
 			return nil, err
 		}
 		tried[token] = struct{}{}
@@ -78,6 +83,23 @@ func callImageWithPool(ctx context.Context, accounts ImageTokenPool, call func(t
 			accounts.MarkInvalidToken(token)
 			continue
 		}
+		lastErr = callErr
+		if isRetryableImageAccountError(callErr) {
+			continue
+		}
 		return nil, callErr
 	}
+}
+
+func isRetryableImageAccountError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "生图超时") ||
+		strings.Contains(text, "image poll timeout") ||
+		strings.Contains(text, "operation timed out") ||
+		strings.Contains(text, "connection timed out") ||
+		strings.Contains(text, "read timed out") ||
+		strings.Contains(text, "connect timeout")
 }

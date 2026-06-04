@@ -23,6 +23,10 @@ type AccountProvider interface {
 	RefreshAccounts(ctx context.Context, tokens []string) map[string]any
 }
 
+type AccountItemProvider interface {
+	AddAccountItems(items []map[string]any) map[string]any
+}
+
 type registerWorkerResult struct {
 	ok     bool
 	index  int
@@ -220,12 +224,40 @@ func (s *Service) runWorker(index int, config map[string]any) registerWorkerResu
 		return registerWorkerResult{ok: false, index: index, err: err.Error(), cost: cost}
 	}
 	if s.accounts != nil {
-		s.accounts.AddAccounts([]string{accessToken})
+		if adder, ok := s.accounts.(AccountItemProvider); ok {
+			adder.AddAccountItems([]map[string]any{result})
+		} else {
+			s.accounts.AddAccounts([]string{accessToken})
+		}
 		s.accounts.RefreshAccounts(context.Background(), []string{accessToken})
 	}
 	s.handleRegisterSuccess(result)
 	s.appendLog(fmt.Sprintf("%s 注册成功，本次耗时%.1fs", clean(result["email"]), cost), "green")
 	return registerWorkerResult{ok: true, index: index, result: result, cost: cost}
+}
+
+func (s *Service) LoginWithPassword(ctx context.Context, email, password string, mailbox map[string]any) (map[string]any, error) {
+	email = clean(email)
+	password = clean(password)
+	if email == "" || password == "" {
+		return nil, fmt.Errorf("email and password are required")
+	}
+	cfg := s.Get()
+	workerCfg := cloneMap(cfg)
+	workerCfg["mail"] = cloneMap(asMap(cfg["mail"]))
+	worker, err := newRegisterWorker(s, 0, workerCfg)
+	if err != nil {
+		return nil, err
+	}
+	defer worker.close()
+	result, err := worker.loginAndExchangeTokens(ctx, email, password, mailbox)
+	if err != nil {
+		return nil, err
+	}
+	result["email"] = email
+	result["password"] = password
+	result["source_type"] = "password"
+	return result, nil
 }
 
 func (s *Service) handleRegisterSuccess(result map[string]any) {

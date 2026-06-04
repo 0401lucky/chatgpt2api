@@ -137,6 +137,9 @@ func (c *Client) imageDataFromLastEvent(ctx context.Context, last map[string]any
 	if message != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 && !shouldPoll && turnUseCase != "image gen" {
 		return nil, fmt.Errorf("%s", message)
 	}
+	if shouldExtendImagePoll(message, fileIDs, sedimentIDs, shouldPoll || turnUseCase == "image gen") {
+		pollTimeout = maxDuration(pollTimeout, 300*time.Second)
+	}
 	urls, err := c.resolveConversationImageURLs(ctx, conversationID, fileIDs, sedimentIDs, pollTarget, shouldPoll || turnUseCase == "image gen", pollTimeout, initialWait, pollInterval)
 	if err != nil {
 		return nil, err
@@ -161,6 +164,10 @@ func (c *Client) imageDataFromLastEvent(ctx context.Context, last map[string]any
 		data = append(data, item)
 	}
 	return data, nil
+}
+
+func shouldExtendImagePoll(message string, fileIDs, sedimentIDs []string, poll bool) bool {
+	return poll && strings.TrimSpace(message) != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0
 }
 
 func (c *Client) prepareImageConversation(ctx context.Context, prompt, model string, requirements ChatRequirements) (string, error) {
@@ -899,6 +906,16 @@ func firstDuration(value, fallback time.Duration) time.Duration {
 		return value
 	}
 	return fallback
+}
+
+func maxDuration(values ...time.Duration) time.Duration {
+	var out time.Duration
+	for _, value := range values {
+		if value > out {
+			out = value
+		}
+	}
+	return out
 }
 
 func sleepContext(ctx context.Context, duration time.Duration) error {

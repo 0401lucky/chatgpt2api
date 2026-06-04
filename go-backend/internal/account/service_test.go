@@ -322,6 +322,54 @@ func TestStartRefreshJobReturnsProgressAndCompletes(t *testing.T) {
 	}
 }
 
+func TestReloginAccountsRotatesTokenAndKeepsPasswordHidden(t *testing.T) {
+	service := newTestService(t, 3)
+	const oldToken = "secret-token-alpha-1234567890"
+	const newToken = "secret-token-beta-1234567890"
+	service.AddAccountItems([]map[string]any{{
+		"access_token": oldToken,
+		"email":        "user@example.test",
+		"password":     "secret-password",
+		"status":       "异常",
+		"quota":        0,
+	}})
+	items := service.ListAccounts()
+	if items[0]["has_password"] != true {
+		t.Fatalf("public account should expose has_password only: %#v", items[0])
+	}
+	if _, ok := items[0]["password"]; ok {
+		t.Fatalf("public account leaked password: %#v", items[0])
+	}
+
+	provider := &fakePasswordReloginProvider{
+		tokens: map[string]any{
+			"access_token":  newToken,
+			"refresh_token": "refresh-new",
+			"id_token":      "id-new",
+		},
+	}
+	refresher := &fakeRemoteRefresher{
+		infoByToken: map[string]map[string]any{
+			newToken: {"quota": 7, "status": "正常", "type": "Plus"},
+		},
+	}
+	refreshed, errorsOut := service.reloginCleanedAccounts(context.Background(), []string{oldToken}, provider, refresher, nil)
+	if refreshed != 1 || len(errorsOut) != 0 {
+		t.Fatalf("relogin result refreshed=%d errors=%#v", refreshed, errorsOut)
+	}
+	if len(provider.calls) != 1 || provider.calls[0] != "user@example.test" {
+		t.Fatalf("provider calls = %#v", provider.calls)
+	}
+	items = service.ListAccounts()
+	if items[0]["id"] != AccountID(newToken) || items[0]["status"] != "正常" || items[0]["quota"] != 7 {
+		t.Fatalf("rotated public account = %#v", items[0])
+	}
+	stored := service.GetAccount(newToken)
+	if clean(stored["password"]) != "secret-password" || clean(stored["refresh_token"]) != "refresh-new" || clean(stored["id_token"]) != "id-new" {
+		t.Fatalf("stored account = %#v", stored)
+	}
+}
+
 func newTestService(t *testing.T, imageConcurrency int) *Service {
 	t.Helper()
 	service, err := NewService(storage.NewJSONStore(t.TempDir()), imageConcurrency)
@@ -329,6 +377,20 @@ func newTestService(t *testing.T, imageConcurrency int) *Service {
 		t.Fatal(err)
 	}
 	return service
+}
+
+type fakePasswordReloginProvider struct {
+	tokens map[string]any
+	err    error
+	calls  []string
+}
+
+func (f *fakePasswordReloginProvider) LoginWithPassword(ctx context.Context, email, password string, mailbox map[string]any) (map[string]any, error) {
+	f.calls = append(f.calls, email)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return copyMap(f.tokens), nil
 }
 
 type fakeRemoteRefresher struct {

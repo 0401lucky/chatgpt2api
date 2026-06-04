@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -206,6 +207,65 @@ func TestAccountRefreshAsyncJobPollsUntilComplete(t *testing.T) {
 	items := pollBody["items"].([]any)
 	item := items[0].(map[string]any)
 	if item["quota"] != float64(42) || item["type"] != "Team" || item["email"] != "async@example.test" {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
+func TestAccountReloginJobPollsUntilComplete(t *testing.T) {
+	app, accounts := newTestApp(t)
+	const oldToken = "token-alpha-1234567890"
+	const newToken = "token-relogin-1234567890"
+	accounts.UpdateAccount(oldToken, map[string]any{
+		"email":    "user@example.test",
+		"password": "secret-password",
+		"status":   "异常",
+		"quota":    0,
+	})
+	accounts.SetPasswordReloginProvider(&fakePasswordRelogin{
+		tokens: map[string]any{"access_token": newToken, "refresh_token": "refresh-new"},
+	})
+	id := account.AccountID(oldToken)
+
+	submit := httptest.NewRecorder()
+	submitReq := httptest.NewRequest(http.MethodPost, "/api/accounts/re-login", bytes.NewReader([]byte(`{"account_ids":["`+id+`"]}`)))
+	submitReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(submit, submitReq)
+	if submit.Code != http.StatusOK {
+		t.Fatalf("submit status = %d body=%s", submit.Code, submit.Body.String())
+	}
+	var submitted map[string]any
+	if err := json.Unmarshal(submit.Body.Bytes(), &submitted); err != nil {
+		t.Fatal(err)
+	}
+	jobID := submitted["progress_id"].(string)
+	if jobID == "" {
+		t.Fatalf("submitted = %#v", submitted)
+	}
+
+	var polled map[string]any
+	for i := 0; i < 20; i++ {
+		poll := httptest.NewRecorder()
+		pollReq := httptest.NewRequest(http.MethodGet, "/api/accounts/re-login/jobs/"+jobID, nil)
+		pollReq.Header.Set("Authorization", "Bearer admin-key")
+		app.ServeHTTP(poll, pollReq)
+		if poll.Code != http.StatusOK {
+			t.Fatalf("poll status = %d body=%s", poll.Code, poll.Body.String())
+		}
+		if err := json.Unmarshal(poll.Body.Bytes(), &polled); err != nil {
+			t.Fatal(err)
+		}
+		job := polled["job"].(map[string]any)
+		if job["status"] == account.RefreshJobSuccess {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	job := polled["job"].(map[string]any)
+	if job["status"] != account.RefreshJobSuccess || job["refreshed"] != float64(1) {
+		t.Fatalf("job = %#v", job)
+	}
+	items := accounts.ListAccounts()
+	if items[0]["id"] != account.AccountID(newToken) || items[0]["status"] != "正常" || items[0]["has_password"] != true {
 		t.Fatalf("items = %#v", items)
 	}
 }
@@ -484,6 +544,7 @@ func newTestApp(t *testing.T) (*App, *account.Service) {
 
 func newTestAppWithModels(t *testing.T, models ModelLister) (*App, *account.Service) {
 	t.Helper()
+	protocol.ClearTextChatCacheForTest()
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "data")
 	if err := os.WriteFile(filepath.Join(root, "config.json"), []byte(`{"auth-key":"admin-key"}`), 0o644); err != nil {
@@ -568,6 +629,22 @@ func (f *fakeAccountRefresher) FetchRemoteInfo(context.Context, string) (map[str
 		return f.info, nil
 	}
 	return map[string]any{"quota": 1, "type": "Free", "status": "正常"}, nil
+}
+
+type fakePasswordRelogin struct {
+	tokens map[string]any
+	err    error
+}
+
+func (f *fakePasswordRelogin) LoginWithPassword(context.Context, string, string, map[string]any) (map[string]any, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := make(map[string]any, len(f.tokens))
+	for key, value := range f.tokens {
+		out[key] = value
+	}
+	return out, nil
 }
 
 func TestChatCompletionsUsesAccountPool(t *testing.T) {
@@ -780,6 +857,71 @@ func TestDirectImageGenerationSkipsInvalidAccountAndRetries(t *testing.T) {
 	data := body["data"].([]any)
 	if len(data) != 1 || data[0].(map[string]any)["b64_json"] != "Y2F0" {
 		t.Fatalf("data = %#v", body["data"])
+	}
+}
+
+func TestDirectImageGenerationRunsMultipleImagesInParallel(t *testing.T) {
+	backend := &concurrentImageBackend{delay: 50 * time.Millisecond}
+	app, _ := newTestAppWithModels(t, backend)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(`{
+		"prompt": "一只小猫",
+		"model": "gpt-image-2",
+		"n": 2,
+		"response_format": "b64_json"
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if backend.maxActiveCount() < 2 {
+		t.Fatalf("expected parallel image generation, max active = %d", backend.maxActiveCount())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	data := body["data"].([]any)
+	if len(data) != 2 {
+		t.Fatalf("data = %#v", body["data"])
+	}
+}
+
+func TestDirectImageGenerationReturnsPartialSuccess(t *testing.T) {
+	backend := &retryingImageBackend{
+		err: fmt.Errorf("temporary upstream image failure"),
+		failTokens: map[string]bool{
+			"token-alpha-1234567890": true,
+		},
+	}
+	app, accounts := newTestAppWithModels(t, backend)
+	addImageAccount(t, accounts, "token-beta-1234567890", 5)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(`{
+		"prompt": "一只小猫",
+		"model": "gpt-image-2",
+		"n": 2,
+		"response_format": "b64_json"
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	data := body["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["b64_json"] != "Y2F0" {
+		t.Fatalf("data = %#v", body["data"])
+	}
+	items := accounts.ListAccounts()
+	if items[0]["fail"] != 1 || items[1]["quota"] != 4 {
+		t.Fatalf("accounts = %#v", items)
 	}
 }
 
@@ -998,6 +1140,33 @@ func TestResponsesImageToolSkipsInvalidAccountAndRetries(t *testing.T) {
 	}
 }
 
+func TestResponsesImageToolPassesSizeAndQuality(t *testing.T) {
+	backend := &capturingImageBackend{}
+	app, _ := newTestAppWithModels(t, backend)
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader([]byte(`{
+		"model": "gpt-image-2",
+		"input": "画一张产品海报",
+		"tools": [{
+			"type": "image_generation",
+			"size": "2:3",
+			"quality": "high"
+		}]
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("responses status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if backend.size != "2:3" {
+		t.Fatalf("size = %q", backend.size)
+	}
+	if !strings.Contains(backend.prompt, "输出图片质量为 high。") {
+		t.Fatalf("prompt = %q", backend.prompt)
+	}
+}
+
 func TestResponses401MarksAccountAbnormal(t *testing.T) {
 	app, accounts := newTestAppWithModels(t, failingChatBackend{
 		err: fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),
@@ -1101,6 +1270,7 @@ func (fakeImageBackend) GenerateImage(ctx context.Context, accessToken, prompt, 
 
 type retryingImageBackend struct {
 	fakeModelLister
+	mu             sync.Mutex
 	err            error
 	failTokens     map[string]bool
 	generateTokens []string
@@ -1108,7 +1278,9 @@ type retryingImageBackend struct {
 }
 
 func (f *retryingImageBackend) GenerateImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string) ([]map[string]any, error) {
+	f.mu.Lock()
 	f.generateTokens = append(f.generateTokens, accessToken)
+	f.mu.Unlock()
 	if f.failTokens[accessToken] {
 		return nil, f.err
 	}
@@ -1116,10 +1288,67 @@ func (f *retryingImageBackend) GenerateImage(ctx context.Context, accessToken, p
 }
 
 func (f *retryingImageBackend) EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error) {
+	f.mu.Lock()
 	f.editTokens = append(f.editTokens, accessToken)
+	f.mu.Unlock()
 	if f.failTokens[accessToken] {
 		return nil, f.err
 	}
+	return fakeImageBackend{}.EditImage(ctx, accessToken, prompt, model, size, responseFormat, images)
+}
+
+type concurrentImageBackend struct {
+	fakeModelLister
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	delay     time.Duration
+}
+
+func (f *concurrentImageBackend) GenerateImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string) ([]map[string]any, error) {
+	f.mu.Lock()
+	f.active++
+	if f.active > f.maxActive {
+		f.maxActive = f.active
+	}
+	f.mu.Unlock()
+
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+		}
+	}
+
+	f.mu.Lock()
+	f.active--
+	f.mu.Unlock()
+	return fakeImageBackend{}.GenerateImage(ctx, accessToken, prompt, model, size, responseFormat)
+}
+
+func (f *concurrentImageBackend) EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error) {
+	return fakeImageBackend{}.EditImage(ctx, accessToken, prompt, model, size, responseFormat, images)
+}
+
+func (f *concurrentImageBackend) maxActiveCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxActive
+}
+
+type capturingImageBackend struct {
+	fakeModelLister
+	prompt string
+	size   string
+}
+
+func (f *capturingImageBackend) GenerateImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string) ([]map[string]any, error) {
+	f.prompt = prompt
+	f.size = size
+	return fakeImageBackend{}.GenerateImage(ctx, accessToken, prompt, model, size, responseFormat)
+}
+
+func (f *capturingImageBackend) EditImage(ctx context.Context, accessToken, prompt, model, size, responseFormat string, images []protocol.ImageInput) ([]map[string]any, error) {
 	return fakeImageBackend{}.EditImage(ctx, accessToken, prompt, model, size, responseFormat, images)
 }
 

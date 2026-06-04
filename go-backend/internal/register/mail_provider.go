@@ -289,7 +289,12 @@ func (p *gptMailProvider) CreateMailbox(ctx context.Context, username string) (m
 	if address == "" {
 		return nil, fmt.Errorf("gptmail response missing email")
 	}
-	return map[string]any{"provider": "gptmail", "provider_ref": p.entry["provider_ref"], "address": address}, nil
+	return map[string]any{
+		"provider":     "gptmail",
+		"provider_ref": p.entry["provider_ref"],
+		"address":      address,
+		"domain":       normalizeDomain(address),
+	}, nil
 }
 
 func (p *gptMailProvider) FetchLatestMessage(ctx context.Context, mailbox map[string]any) (map[string]any, error) {
@@ -301,11 +306,7 @@ func (p *gptMailProvider) FetchLatestMessage(ctx context.Context, mailbox map[st
 	if err != nil {
 		return nil, err
 	}
-	body := asMap(data)
-	if nested := asMap(body["data"]); len(nested) > 0 {
-		body = nested
-	}
-	items := asMapSlice(firstNonNil(body["emails"], data))
+	items := gptMailEmails(data)
 	if len(items) == 0 {
 		return nil, nil
 	}
@@ -336,6 +337,29 @@ func (p *gptMailProvider) FetchLatestMessage(ctx context.Context, mailbox map[st
 		"received_at":  firstNonNil(latest["timestamp"], latest["created_at"]),
 		"raw":          latest,
 	}, nil
+}
+
+func gptMailEmails(data any) []map[string]any {
+	body := asMap(data)
+	if len(body) == 0 {
+		return asMapSlice(data)
+	}
+	if nestedItems := asMapSlice(body["data"]); len(nestedItems) > 0 {
+		if len(nestedItems) == 1 {
+			if emails := asMapSlice(nestedItems[0]["emails"]); len(emails) > 0 {
+				return emails
+			}
+		}
+		if _, ok := asMap(body["data"])["emails"]; !ok {
+			return nestedItems
+		}
+	}
+	if nested := asMap(body["data"]); len(nested) > 0 {
+		if emails := asMapSlice(nested["emails"]); len(emails) > 0 {
+			return emails
+		}
+	}
+	return asMapSlice(body["emails"])
 }
 
 func (p *yydsMailProvider) CreateMailbox(ctx context.Context, username string) (map[string]any, error) {

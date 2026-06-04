@@ -32,11 +32,13 @@ func ChatCompletion(ctx context.Context, streamer ConversationStreamer, accessTo
 	if err != nil {
 		return nil, err
 	}
-	text, err := CollectText(ctx, streamer, accessToken, model, messages)
-	if err != nil {
-		return nil, err
-	}
-	return CompletionResponse(model, text, messages), nil
+	return cachedTextChatCompletion(ctx, body, messages, func() (map[string]any, error) {
+		text, err := CollectText(ctx, streamer, accessToken, model, messages)
+		if err != nil {
+			return nil, err
+		}
+		return CompletionResponse(model, text, messages), nil
+	})
 }
 
 func StreamChatCompletion(ctx context.Context, streamer ConversationStreamer, accessToken string, body map[string]any) (<-chan map[string]any, <-chan error, error) {
@@ -142,16 +144,72 @@ func ChatMessagesFromBody(body map[string]any) ([]map[string]any, error) {
 func NormalizeMessages(messages []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(messages))
 	for _, message := range messages {
-		text := MessageText(message["content"])
-		if strings.TrimSpace(text) == "" {
+		content, ok := NormalizeMessageContent(message["content"])
+		if !ok {
 			continue
 		}
 		out = append(out, map[string]any{
 			"role":    firstNonEmpty(clean(message["role"]), "user"),
-			"content": text,
+			"content": content,
 		})
 	}
 	return out
+}
+
+func NormalizeMessageContent(content any) (any, bool) {
+	switch value := content.(type) {
+	case string:
+		text := strings.TrimSpace(value)
+		if text == "" {
+			return nil, false
+		}
+		return value, true
+	case []any:
+		parts := make([]any, 0, len(value))
+		for _, raw := range value {
+			switch item := raw.(type) {
+			case string:
+				if strings.TrimSpace(item) != "" {
+					parts = append(parts, map[string]any{"type": "text", "text": item})
+				}
+			case map[string]any:
+				normalized, ok := normalizeContentPart(item)
+				if ok {
+					parts = append(parts, normalized)
+				}
+			}
+		}
+		if len(parts) == 0 {
+			return nil, false
+		}
+		return parts, true
+	default:
+		text := strings.TrimSpace(clean(content))
+		if text == "" {
+			return nil, false
+		}
+		return text, true
+	}
+}
+
+func normalizeContentPart(item map[string]any) (map[string]any, bool) {
+	partType := strings.ToLower(clean(item["type"]))
+	switch partType {
+	case "text", "input_text", "output_text":
+		text := clean(item["text"])
+		if strings.TrimSpace(text) == "" {
+			return nil, false
+		}
+		return map[string]any{"type": partType, "text": text}, true
+	case "image_url", "input_image", "image":
+		next := copyAnyMap(item)
+		if partType == "" {
+			next["type"] = "image_url"
+		}
+		return next, true
+	default:
+		return nil, false
+	}
 }
 
 func MessageText(content any) string {
@@ -175,6 +233,34 @@ func MessageText(content any) string {
 	default:
 		return clean(content)
 	}
+}
+
+func MessagesHaveImage(messages []map[string]any) bool {
+	for _, message := range messages {
+		if ContentHasImage(message["content"]) {
+			return true
+		}
+	}
+	return false
+}
+
+func ContentHasImage(content any) bool {
+	for _, raw := range anyList(content) {
+		item := asMap(raw)
+		switch strings.ToLower(clean(item["type"])) {
+		case "image_url", "input_image", "image":
+			return true
+		}
+	}
+	return false
+}
+
+func copyAnyMap(item map[string]any) map[string]any {
+	out := make(map[string]any, len(item))
+	for key, value := range item {
+		out[key] = value
+	}
+	return out
 }
 
 func IterConversationPayloads(ctx context.Context, payloads <-chan string, historyText string, historyMessages []string, emit func(map[string]any) error) error {

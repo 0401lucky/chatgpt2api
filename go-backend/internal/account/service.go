@@ -24,6 +24,10 @@ type OAuthTokenRefresher interface {
 	RefreshAccessToken(ctx context.Context, refreshToken string) (map[string]any, error)
 }
 
+type PasswordReloginProvider interface {
+	LoginWithPassword(ctx context.Context, email, password string, mailbox map[string]any) (map[string]any, error)
+}
+
 const (
 	maxRefreshWorkers = 10
 	refreshSaveEvery  = 25
@@ -45,6 +49,8 @@ type Service struct {
 	imageReservations       map[string]int
 	imageAccountConcurrency int
 	refreshJobs             map[string]*RefreshJob
+	relogin                 PasswordReloginProvider
+	reloginJobs             map[string]*RefreshJob
 }
 
 type RefreshJob struct {
@@ -81,6 +87,7 @@ func NewService(store Store, imageAccountConcurrency int) (*Service, error) {
 		imageReservations:       map[string]int{},
 		imageAccountConcurrency: imageAccountConcurrency,
 		refreshJobs:             map[string]*RefreshJob{},
+		reloginJobs:             map[string]*RefreshJob{},
 	}, nil
 }
 
@@ -88,6 +95,12 @@ func (s *Service) SetRemoteRefresher(refresher RemoteRefresher) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refresher = refresher
+}
+
+func (s *Service) SetPasswordReloginProvider(provider PasswordReloginProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.relogin = provider
 }
 
 func (s *Service) ListAccounts() []map[string]any {
@@ -152,10 +165,21 @@ func (s *Service) AddAccounts(tokens []string) map[string]any {
 	if len(cleaned) == 0 {
 		return map[string]any{"added": 0, "skipped": 0, "items": s.ListAccounts()}
 	}
+	items := make([]map[string]any, 0, len(cleaned))
+	for _, token := range cleaned {
+		items = append(items, map[string]any{"access_token": token})
+	}
+	return s.AddAccountItems(items)
+}
+
+func (s *Service) AddAccountItems(items []map[string]any) map[string]any {
+	if len(items) == 0 {
+		return map[string]any{"added": 0, "skipped": 0, "items": s.ListAccounts()}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	indexed := map[string]map[string]any{}
-	order := make([]string, 0, len(s.items)+len(cleaned))
+	order := make([]string, 0, len(s.items)+len(items))
 	for _, item := range s.items {
 		token := clean(item["access_token"])
 		if token == "" {
@@ -165,7 +189,11 @@ func (s *Service) AddAccounts(tokens []string) map[string]any {
 		order = append(order, token)
 	}
 	added, skipped := 0, 0
-	for _, token := range cleaned {
+	for _, raw := range items {
+		token := clean(raw["access_token"])
+		if token == "" {
+			continue
+		}
 		current, ok := indexed[token]
 		if ok {
 			skipped++
@@ -175,6 +203,9 @@ func (s *Service) AddAccounts(tokens []string) map[string]any {
 			order = append(order, token)
 		}
 		next := copyMap(current)
+		for key, value := range raw {
+			next[key] = value
+		}
 		next["access_token"] = token
 		if clean(next["type"]) == "" {
 			next["type"] = "Free"
@@ -259,7 +290,7 @@ func (s *Service) updateAccountFieldsWithSave(accessToken string, updates map[st
 	for key, value := range updates {
 		if manualUpdate {
 			switch key {
-			case "type", "status", "quota":
+			case "type", "status", "quota", "email", "password", "refresh_token", "source_type":
 				next[key] = value
 			}
 			continue
@@ -347,6 +378,46 @@ func (s *Service) GetRefreshJob(id string) map[string]any {
 	return publicRefreshJob(job)
 }
 
+func (s *Service) StartReloginJob(tokens []string) (map[string]any, error) {
+	cleaned := cleanTokens(tokens)
+	if len(cleaned) == 0 {
+		return nil, errors.New("access_tokens or account_ids is required")
+	}
+	now := nowString()
+	job := &RefreshJob{
+		ID:        newRefreshJobID(),
+		Status:    RefreshJobQueued,
+		Requested: len(cleaned),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.mu.Lock()
+	if s.reloginJobs == nil {
+		s.reloginJobs = map[string]*RefreshJob{}
+	}
+	s.cleanupReloginJobsLocked()
+	s.reloginJobs[job.ID] = job
+	public := publicRefreshJob(job)
+	s.mu.Unlock()
+
+	go s.runReloginJob(job.ID, cleaned)
+	return public, nil
+}
+
+func (s *Service) GetReloginJob(id string) map[string]any {
+	id = clean(id)
+	if id == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.reloginJobs[id]
+	if job == nil {
+		return nil
+	}
+	return publicRefreshJob(job)
+}
+
 func (s *Service) runRefreshJob(id string, cleaned []string) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -365,6 +436,34 @@ func (s *Service) runRefreshJob(id string, cleaned []string) {
 		s.recordRefreshJobProgress(id, completed, refreshed, errorItem)
 	})
 	s.updateRefreshJob(id, map[string]any{
+		"status":      RefreshJobSuccess,
+		"completed":   len(cleaned),
+		"refreshed":   refreshed,
+		"failed":      len(errorsOut),
+		"errors":      errorsOut,
+		"finished_at": nowString(),
+	})
+}
+
+func (s *Service) runReloginJob(id string, cleaned []string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.updateReloginJob(id, map[string]any{
+				"status":      RefreshJobError,
+				"error":       fmt.Sprintf("relogin job panic: %v", recovered),
+				"finished_at": nowString(),
+			})
+		}
+	}()
+	s.updateReloginJob(id, map[string]any{"status": RefreshJobRunning})
+	s.mu.Lock()
+	provider := s.relogin
+	refresher := s.refresher
+	s.mu.Unlock()
+	refreshed, errorsOut := s.reloginCleanedAccounts(context.Background(), cleaned, provider, refresher, func(completed, refreshed int, errorItem map[string]string) {
+		s.recordReloginJobProgress(id, completed, refreshed, errorItem)
+	})
+	s.updateReloginJob(id, map[string]any{
 		"status":      RefreshJobSuccess,
 		"completed":   len(cleaned),
 		"refreshed":   refreshed,
@@ -457,6 +556,75 @@ func (s *Service) refreshCleanedAccounts(ctx context.Context, cleaned []string, 
 	return refreshed, errorsOut
 }
 
+func (s *Service) reloginCleanedAccounts(ctx context.Context, cleaned []string, provider PasswordReloginProvider, refresher RemoteRefresher, onProgress func(completed, refreshed int, errorItem map[string]string)) (int, []map[string]string) {
+	refreshed := 0
+	errorsOut := []map[string]string{}
+	for index, token := range cleaned {
+		var errorItem map[string]string
+		if ctx.Err() != nil {
+			errorItem = publicError(token, ctx.Err().Error())
+			errorsOut = append(errorsOut, errorItem)
+			if onProgress != nil {
+				onProgress(index+1, refreshed, errorItem)
+			}
+			continue
+		}
+		nextToken, err := s.reloginOneAccount(ctx, token, provider, refresher)
+		if err != nil {
+			errorItem = publicError(token, safeError(token, err.Error()))
+			errorsOut = append(errorsOut, errorItem)
+			if onProgress != nil {
+				onProgress(index+1, refreshed, errorItem)
+			}
+			continue
+		}
+		if nextToken != "" {
+			refreshed++
+		}
+		if onProgress != nil {
+			onProgress(index+1, refreshed, nil)
+		}
+	}
+	return refreshed, errorsOut
+}
+
+func (s *Service) reloginOneAccount(ctx context.Context, accessToken string, provider PasswordReloginProvider, refresher RemoteRefresher) (string, error) {
+	if provider == nil {
+		return "", errors.New("password relogin provider is not configured")
+	}
+	account := s.GetAccount(accessToken)
+	if account == nil {
+		return "", errors.New("account not found")
+	}
+	email := clean(account["email"])
+	password := clean(account["password"])
+	if email == "" || password == "" {
+		return "", errors.New("account has no email or password")
+	}
+	tokens, err := provider.LoginWithPassword(ctx, email, password, accountMailbox(account))
+	if err != nil {
+		s.MarkInvalidToken(accessToken)
+		return "", err
+	}
+	if tokens == nil {
+		return "", errors.New("password relogin returned empty token payload")
+	}
+	tokens["email"] = email
+	tokens["password"] = password
+	tokens["source_type"] = firstNonEmpty(clean(tokens["source_type"]), "password")
+	tokens["status"] = "正常"
+	nextToken := s.rotateAccessToken(accessToken, tokens)
+	if nextToken == "" {
+		return "", errors.New("password relogin did not return a usable access_token")
+	}
+	if refresher != nil {
+		if remoteInfo, refreshErr := refresher.FetchRemoteInfo(ctx, nextToken); refreshErr == nil {
+			_ = s.updateAccountFieldsWithSave(nextToken, remoteInfo, false, true)
+		}
+	}
+	return nextToken, nil
+}
+
 type accountRefreshResult struct {
 	originalToken string
 	finalToken    string
@@ -510,8 +678,10 @@ func (s *Service) rotateAccessToken(oldAccessToken string, newTokens map[string]
 	}
 	next := copyMap(s.items[index])
 	next["access_token"] = newAccessToken
-	if refreshToken := clean(newTokens["refresh_token"]); refreshToken != "" {
-		next["refresh_token"] = refreshToken
+	for _, key := range []string{"refresh_token", "id_token", "expires_at", "source_type", "email", "password", "status"} {
+		if value := optionalString(newTokens[key]); value != nil {
+			next[key] = value
+		}
 	}
 	normalized := normalizeAccount(next)
 	if normalized == nil {
@@ -683,6 +853,24 @@ func (s *Service) updateRefreshJob(id string, updates map[string]any) {
 	if job == nil {
 		return
 	}
+	applyRefreshJobUpdates(job, updates)
+}
+
+func (s *Service) updateReloginJob(id string, updates map[string]any) {
+	id = clean(id)
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.reloginJobs[id]
+	if job == nil {
+		return
+	}
+	applyRefreshJobUpdates(job, updates)
+}
+
+func applyRefreshJobUpdates(job *RefreshJob, updates map[string]any) {
 	if status := clean(updates["status"]); status != "" {
 		job.Status = status
 	}
@@ -727,6 +915,26 @@ func (s *Service) recordRefreshJobProgress(id string, completed, refreshed int, 
 	job.UpdatedAt = nowString()
 }
 
+func (s *Service) recordReloginJobProgress(id string, completed, refreshed int, errorItem map[string]string) {
+	id = clean(id)
+	if id == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.reloginJobs[id]
+	if job == nil {
+		return
+	}
+	job.Completed = completed
+	job.Refreshed = refreshed
+	if errorItem != nil {
+		job.Failed++
+		job.Errors = append(job.Errors, copyStringMap(errorItem))
+	}
+	job.UpdatedAt = nowString()
+}
+
 func (s *Service) cleanupRefreshJobsLocked() {
 	cutoff := time.Now().Add(-24 * time.Hour)
 	for id, job := range s.refreshJobs {
@@ -740,6 +948,23 @@ func (s *Service) cleanupRefreshJobsLocked() {
 		updatedAt, err := time.ParseInLocation("2006-01-02 15:04:05", job.UpdatedAt, time.Local)
 		if err == nil && updatedAt.Before(cutoff) {
 			delete(s.refreshJobs, id)
+		}
+	}
+}
+
+func (s *Service) cleanupReloginJobsLocked() {
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for id, job := range s.reloginJobs {
+		if job == nil {
+			delete(s.reloginJobs, id)
+			continue
+		}
+		if job.Status == RefreshJobQueued || job.Status == RefreshJobRunning {
+			continue
+		}
+		updatedAt, err := time.ParseInLocation("2006-01-02 15:04:05", job.UpdatedAt, time.Local)
+		if err == nil && updatedAt.Before(cutoff) {
+			delete(s.reloginJobs, id)
 		}
 	}
 }
@@ -770,6 +995,14 @@ func normalizeAccount(item map[string]any) map[string]any {
 	next["image_quota_unknown"] = boolValue(next["image_quota_unknown"], false)
 	next["email"] = optionalString(next["email"])
 	next["user_id"] = optionalString(next["user_id"])
+	next["password"] = optionalString(next["password"])
+	next["id_token"] = optionalString(next["id_token"])
+	next["expires_at"] = optionalString(next["expires_at"])
+	next["source_type"] = optionalString(next["source_type"])
+	next["mail_provider"] = optionalString(next["mail_provider"])
+	next["mail_provider_ref"] = optionalString(next["mail_provider_ref"])
+	next["mail_domain"] = optionalString(next["mail_domain"])
+	next["chatgpt_account_id"] = optionalString(next["chatgpt_account_id"])
 	if _, ok := next["limits_progress"].([]any); !ok {
 		next["limits_progress"] = []any{}
 	}
@@ -808,10 +1041,15 @@ func publicAccount(item map[string]any) map[string]any {
 		"imageQuotaUnknown":   boolValue(item["image_quota_unknown"], false),
 		"email":               nullable(item["email"]),
 		"user_id":             nullable(item["user_id"]),
+		"chatgpt_account_id":  nullable(item["chatgpt_account_id"]),
 		"limits_progress":     listValue(item["limits_progress"]),
 		"default_model_slug":  nullable(item["default_model_slug"]),
 		"restore_at":          nullable(item["restore_at"]),
 		"restoreAt":           nullable(item["restore_at"]),
+		"has_password":        clean(item["password"]) != "",
+		"hasPassword":         clean(item["password"]) != "",
+		"source_type":         nullable(item["source_type"]),
+		"expires_at":          nullable(item["expires_at"]),
 		"success":             intValue(item["success"], 0),
 		"fail":                intValue(item["fail"], 0),
 		"last_used_at":        nullable(item["last_used_at"]),
@@ -824,6 +1062,15 @@ func publicError(token, message string) map[string]string {
 		"account_id":    AccountID(token),
 		"token_preview": TokenPreview(token),
 		"error":         message,
+	}
+}
+
+func accountMailbox(item map[string]any) map[string]any {
+	return map[string]any{
+		"address":      clean(item["email"]),
+		"provider":     clean(item["mail_provider"]),
+		"provider_ref": clean(item["mail_provider_ref"]),
+		"domain":       clean(item["mail_domain"]),
 	}
 }
 

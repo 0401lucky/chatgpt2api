@@ -342,6 +342,60 @@ func TestDownloadImageBytesUsesChatGPTHeadersForBackendURL(t *testing.T) {
 	}
 }
 
+func TestAPIMessagesToConversationMessagesUploadsImageInput(t *testing.T) {
+	var uploaded atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/backend-api/files":
+			if r.Method != http.MethodPost {
+				t.Fatalf("upload metadata method = %s", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"upload_url": "http://" + r.Host + "/upload-target",
+				"file_id":    "file-vision-1",
+			})
+		case "/upload-target":
+			if r.Method != http.MethodPut {
+				t.Fatalf("upload bytes method = %s", r.Method)
+			}
+			uploaded.Store(true)
+			w.WriteHeader(http.StatusOK)
+		case "/backend-api/files/file-vision-1/uploaded":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := NewTestClient(server.URL, "test-token", nil, server.Client())
+	messages, err := client.apiMessagesToConversationMessages(context.Background(), []map[string]any{{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "input_text", "text": "describe this"},
+			map[string]any{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !uploaded.Load() {
+		t.Fatal("image bytes were not uploaded")
+	}
+	if len(messages) != 1 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	content := messages[0]["content"].(map[string]any)
+	if content["content_type"] != "multimodal_text" {
+		t.Fatalf("content = %#v", content)
+	}
+	parts := content["parts"].([]any)
+	first := parts[0].(map[string]any)
+	if first["asset_pointer"] != "file-service://file-vision-1" {
+		t.Fatalf("parts = %#v", parts)
+	}
+}
+
 type fakeAccountLookup struct {
 	account map[string]any
 }

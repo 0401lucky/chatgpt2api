@@ -32,6 +32,19 @@ func TestServiceSnapshotMergesLiveAccountPoolMetrics(t *testing.T) {
 	}
 }
 
+func TestNormalizeRegisterMailConfigKeepsProxy(t *testing.T) {
+	cfg := normalizeRegisterMailConfig(map[string]any{
+		"proxy": "http://127.0.0.1:7890",
+		"providers": []map[string]any{
+			{"type": "gptmail", "enable": true},
+		},
+	})
+
+	if got := clean(cfg["proxy"]); got != "http://127.0.0.1:7890" {
+		t.Fatalf("mail proxy = %q", got)
+	}
+}
+
 type fakeAccountProvider struct {
 	items []map[string]any
 }

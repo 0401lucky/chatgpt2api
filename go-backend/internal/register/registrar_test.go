@@ -65,6 +65,36 @@ func TestRegisterHTTPClientAcceptsSocksProxyConfig(t *testing.T) {
 	}
 }
 
+func TestRegisterMailConfigForWorkerUsesTopLevelProxy(t *testing.T) {
+	config := map[string]any{
+		"proxy": "http://127.0.0.1:7890",
+		"mail": map[string]any{
+			"request_timeout": 10,
+			"proxy":           "http://127.0.0.1:8080",
+		},
+	}
+
+	mail := registerMailConfigForWorker(config)
+	if got := clean(mail["proxy"]); got != "http://127.0.0.1:7890" {
+		t.Fatalf("worker mail proxy = %q", got)
+	}
+	if clean(asMap(config["mail"])["proxy"]) != "http://127.0.0.1:8080" {
+		t.Fatalf("registerMailConfigForWorker mutated original mail config")
+	}
+}
+
+func TestRegisterMailConfigForWorkerKeepsMailProxyWithoutTopLevelProxy(t *testing.T) {
+	config := map[string]any{
+		"proxy": "",
+		"mail":  map[string]any{"proxy": "http://127.0.0.1:8080"},
+	}
+
+	mail := registerMailConfigForWorker(config)
+	if got := clean(mail["proxy"]); got != "http://127.0.0.1:8080" {
+		t.Fatalf("worker mail proxy = %q", got)
+	}
+}
+
 func TestRequestDetailedWithFinalURLReturnsRedirectCallbackCode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

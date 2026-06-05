@@ -517,6 +517,7 @@ func normalizeRegisterMailConfig(raw map[string]any) map[string]any {
 		"wait_timeout":    maxInt(1, intValue(raw["wait_timeout"], 30)),
 		"wait_interval":   maxInt(1, intValue(raw["wait_interval"], 3)),
 		"user_agent":      firstNonEmpty(clean(raw["user_agent"]), registerUserAgent),
+		"proxy":           clean(raw["proxy"]),
 	}
 	providers := asMapSlice(raw["providers"])
 	out := make([]map[string]any, 0, len(providers))

@@ -85,11 +85,19 @@ func newRegisterWorker(service *Service, index int, config map[string]any) (*reg
 		service:  service,
 		index:    index,
 		config:   config,
-		mail:     asMap(config["mail"]),
+		mail:     registerMailConfigForWorker(config),
 		factory:  service.mail,
 		client:   client,
 		deviceID: deviceID,
 	}, nil
+}
+
+func registerMailConfigForWorker(config map[string]any) map[string]any {
+	mail := cloneMap(asMap(config["mail"]))
+	if proxy := clean(config["proxy"]); proxy != "" {
+		mail["proxy"] = proxy
+	}
+	return mail
 }
 
 func registerHTTPClient(proxy string, timeout time.Duration, deviceID string) (*http.Client, error) {

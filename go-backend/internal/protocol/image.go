@@ -79,11 +79,11 @@ func callImageWithPool(ctx context.Context, accounts ImageTokenPool, call func(t
 		}
 
 		accounts.MarkImageResult(token, false)
+		lastErr = callErr
 		if account.IsInvalidTokenError(callErr) {
 			accounts.MarkInvalidToken(token)
 			continue
 		}
-		lastErr = callErr
 		if isRetryableImageAccountError(callErr) {
 			continue
 		}

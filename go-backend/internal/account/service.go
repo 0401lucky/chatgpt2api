@@ -1238,6 +1238,8 @@ func IsInvalidTokenError(err error) bool {
 		strings.Contains(message, "status=401") ||
 		strings.Contains(message, "token_invalidated") ||
 		strings.Contains(message, "token_revoked") ||
+		strings.Contains(message, "invalid access token") ||
+		strings.Contains(message, "invalid bearer token") ||
 		strings.Contains(message, "authentication token has been invalidated") ||
 		strings.Contains(message, "invalidated oauth token")
 }

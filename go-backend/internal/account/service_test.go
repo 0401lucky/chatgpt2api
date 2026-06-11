@@ -171,6 +171,7 @@ func TestIsInvalidTokenErrorAcceptsRuntime401(t *testing.T) {
 		fmt.Errorf("auth_chat_requirements failed: HTTP 401"),
 		fmt.Errorf("conversation failed: status=401"),
 		fmt.Errorf("authentication token has been invalidated"),
+		fmt.Errorf("invalid access token"),
 	}
 	for _, err := range cases {
 		if !IsInvalidTokenError(err) {

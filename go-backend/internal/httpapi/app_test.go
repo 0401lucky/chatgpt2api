@@ -561,12 +561,14 @@ func newTestAppWithModels(t *testing.T, models ModelLister) (*App, *account.Serv
 	}
 	cfg := &config.Config{
 		ProjectRoot:             root,
+		ConfigFile:              filepath.Join(root, "config.json"),
 		AuthKey:                 "admin-key",
 		Version:                 "test-version",
 		DataDir:                 filepath.Dir(store.AccountsPath),
 		ImageAccountConcurrency: 3,
 		ImageRetentionDays:      3,
 		ImagePollTimeoutSecs:    1,
+		Raw:                     map[string]any{"auth-key": "admin-key"},
 	}
 	return New(cfg, accounts, auth.NewService(store, cfg.AuthKey), models), accounts
 }
@@ -690,6 +692,36 @@ func TestChatCompletion401MarksAccountAbnormal(t *testing.T) {
 	items := accounts.ListAccounts()
 	if items[0]["status"] != "异常" || items[0]["quota"] != 0 {
 		t.Fatalf("401 account should be abnormal, item = %#v", items[0])
+	}
+}
+
+func TestSettingsAutoRemoveInvalidAccountAffectsRuntimeCalls(t *testing.T) {
+	app, accounts := newTestAppWithModels(t, failingChatBackend{
+		err: fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),
+	})
+
+	settings := httptest.NewRecorder()
+	settingsReq := httptest.NewRequest(http.MethodPost, "/api/settings", bytes.NewReader([]byte(`{
+		"auto_remove_invalid_accounts": true
+	}`)))
+	settingsReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(settings, settingsReq)
+	if settings.Code != http.StatusOK {
+		t.Fatalf("settings status = %d body=%s", settings.Code, settings.Body.String())
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{
+		"model": "auto",
+		"messages": [{"role": "user", "content": "ping"}]
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := len(accounts.ListAccounts()); got != 0 {
+		t.Fatalf("invalid account should be removed, remaining=%d items=%#v", got, accounts.ListAccounts())
 	}
 }
 
@@ -1377,12 +1409,97 @@ func TestImageGeneration401MarksAccountAbnormal(t *testing.T) {
 	}`)))
 	req.Header.Set("Authorization", "Bearer admin-key")
 	app.ServeHTTP(resp, req)
-	if resp.Code != http.StatusServiceUnavailable {
+	if resp.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
 	}
 	items := accounts.ListAccounts()
 	if items[0]["status"] != "异常" || items[0]["quota"] != 0 {
 		t.Fatalf("401 account should be abnormal, item = %#v", items[0])
+	}
+}
+
+func TestImageGenerationRuntimeFailureDoesNotMarkAccountAbnormal(t *testing.T) {
+	app, accounts := newTestAppWithModels(t, failingImageBackend{
+		err: fmt.Errorf("ChatGPT 生图超时（已等待 120 秒），可能是账号被限流或生图队列拥堵"),
+	})
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(`{
+		"prompt": "一只小猫",
+		"model": "gpt-image-2",
+		"n": 1
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	items := accounts.ListAccounts()
+	if items[0]["status"] != "正常" || items[0]["quota"] != 5 || items[0]["fail"] != 1 {
+		t.Fatalf("runtime failure should only count failure, item = %#v", items[0])
+	}
+}
+
+func TestSettingsAutoRemoveInvalidAccountAffectsImage401(t *testing.T) {
+	app, accounts := newTestAppWithModels(t, failingImageBackend{
+		err: fmt.Errorf("/backend-api/conversation failed: HTTP 401, body={\"error\":{\"code\":\"token_invalidated\"}}"),
+	})
+
+	settings := httptest.NewRecorder()
+	settingsReq := httptest.NewRequest(http.MethodPost, "/api/settings", bytes.NewReader([]byte(`{
+		"auto_remove_invalid_accounts": true
+	}`)))
+	settingsReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(settings, settingsReq)
+	if settings.Code != http.StatusOK {
+		t.Fatalf("settings status = %d body=%s", settings.Code, settings.Body.String())
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(`{
+		"prompt": "一只小猫",
+		"model": "gpt-image-2",
+		"n": 1
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := len(accounts.ListAccounts()); got != 0 {
+		t.Fatalf("401 account should be removed, remaining=%d items=%#v", got, accounts.ListAccounts())
+	}
+}
+
+func TestSettingsAutoRemoveInvalidAccountDoesNotRemoveImageTimeout(t *testing.T) {
+	app, accounts := newTestAppWithModels(t, failingImageBackend{
+		err: fmt.Errorf("ChatGPT 生图超时（已等待 120 秒），可能是账号被限流或生图队列拥堵"),
+	})
+
+	settings := httptest.NewRecorder()
+	settingsReq := httptest.NewRequest(http.MethodPost, "/api/settings", bytes.NewReader([]byte(`{
+		"auto_remove_invalid_accounts": true
+	}`)))
+	settingsReq.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(settings, settingsReq)
+	if settings.Code != http.StatusOK {
+		t.Fatalf("settings status = %d body=%s", settings.Code, settings.Body.String())
+	}
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(`{
+		"prompt": "一只小猫",
+		"model": "gpt-image-2",
+		"n": 1
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	items := accounts.ListAccounts()
+	if len(items) != 1 || items[0]["status"] != "正常" || items[0]["fail"] != 1 {
+		t.Fatalf("timeout should not remove account, items=%#v", items)
 	}
 }
 

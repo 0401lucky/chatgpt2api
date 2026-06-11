@@ -29,6 +29,9 @@ func TestGenerateImageWithPoolRetriesPollTimeoutOnNextAccount(t *testing.T) {
 	if accounts.fail["token-a"] != 1 || accounts.success["token-b"] != 1 {
 		t.Fatalf("marks success=%#v fail=%#v", accounts.success, accounts.fail)
 	}
+	if accounts.invalid["token-a"] != 0 {
+		t.Fatalf("timeout should not mark account abnormal, invalid=%#v", accounts.invalid)
+	}
 }
 
 type fakeImageGenerator struct {

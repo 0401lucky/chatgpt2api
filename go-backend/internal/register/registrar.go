@@ -879,6 +879,9 @@ func isCloudflareChallengePayload(payload map[string]any) bool {
 	body := strings.ToLower(clean(payload["body"]))
 	return strings.Contains(body, "challenges.cloudflare.com") ||
 		strings.Contains(body, "<title>just a moment") ||
+		strings.Contains(body, "<title>attention required! | cloudflare") ||
+		strings.Contains(body, "cf-chl-") ||
+		strings.Contains(body, "__cf_chl_") ||
 		strings.Contains(body, "cf-browser-verification")
 }
 

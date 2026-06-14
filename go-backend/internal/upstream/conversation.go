@@ -93,46 +93,62 @@ func (c *Client) getChatRequirements(ctx context.Context) (ChatRequirements, err
 }
 
 func (c *Client) getChatRequirementsOnce(ctx context.Context) (ChatRequirements, error) {
-	path := "/backend-anon/sentinel/chat-requirements"
+	basePath := "/backend-anon/sentinel/chat-requirements"
 	contextName := "noauth_chat_requirements"
-	sourceP := ""
 	if c.AccessToken != "" {
-		path = "/backend-api/sentinel/chat-requirements"
+		basePath = "/backend-api/sentinel/chat-requirements"
 		contextName = "auth_chat_requirements"
 	}
-	sourceP = buildLegacyRequirementsToken(c.userAgent, c.powSources, c.powDataBuild)
-	body, _ := json.Marshal(map[string]any{"p": sourceP})
+
+	sourceP := buildLegacyRequirementsToken(c.userAgent, c.powSources, c.powDataBuild)
+	preparePath := basePath + "/prepare"
+	preparePayload, err := c.postChatRequirementsJSON(ctx, contextName+"_prepare", preparePath, map[string]any{"p": sourceP})
+	if err != nil {
+		return ChatRequirements{}, err
+	}
+
+	requirements, err := c.buildRequirements(preparePayload, sourceP, "")
+	if err != nil {
+		return ChatRequirements{}, err
+	}
+	finalizePath := basePath + "/finalize"
+	finalizePayload, err := c.postChatRequirementsJSON(ctx, contextName+"_finalize", finalizePath, map[string]any{
+		"prepare_token":   cleanString(preparePayload["prepare_token"]),
+		"proof_token":     requirements.ProofToken,
+		"turnstile_token": requirements.TurnstileToken,
+	})
+	if err != nil {
+		return ChatRequirements{}, err
+	}
+	requirements.Token = cleanString(finalizePayload["token"])
+	requirements.SOToken = cleanString(finalizePayload["so_token"])
+	requirements.Raw = finalizePayload
+	if requirements.Token == "" {
+		return ChatRequirements{}, fmt.Errorf("missing chat requirements token: %v", finalizePayload)
+	}
+	return requirements, nil
+}
+
+func (c *Client) postChatRequirementsJSON(ctx context.Context, contextName, path string, payload map[string]any) (map[string]any, error) {
+	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(body))
 	for key, value := range c.headers(path, map[string]string{"Content-Type": "application/json"}) {
 		req.Header.Set(key, value)
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return ChatRequirements{}, fmt.Errorf("%s failed: %w", contextName, err)
+		return nil, fmt.Errorf("%s failed: %w", contextName, err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ChatRequirements{}, upstreamHTTPError(contextName, resp.StatusCode, data)
+		return nil, upstreamHTTPError(contextName, resp.StatusCode, data)
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return ChatRequirements{}, err
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
 	}
-	turnstileSourceP := sourceP
-	turnstileFallbackP := ""
-	if c.AccessToken != "" {
-		turnstileSourceP = ""
-		turnstileFallbackP = sourceP
-	}
-	requirements, err := c.buildRequirements(payload, turnstileSourceP, turnstileFallbackP)
-	if err != nil {
-		return ChatRequirements{}, err
-	}
-	if requirements.Token == "" {
-		return ChatRequirements{}, fmt.Errorf("missing chat requirements token: %v", payload)
-	}
-	return requirements, nil
+	return result, nil
 }
 
 func (c *Client) buildRequirements(data map[string]any, sourceP string, fallbackP string) (ChatRequirements, error) {

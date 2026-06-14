@@ -19,6 +19,18 @@ type Searcher interface {
 
 const SearchModel = "gpt-5-5"
 
+var webSearchToolTypes = map[string]struct{}{
+	"web_search":                    {},
+	"web_search_preview":            {},
+	"web_search_preview_2025_03_11": {},
+}
+
+var searchChatModelPrefixes = []string{
+	"gpt-4o-search-preview",
+	"gpt-4o-mini-search-preview",
+	"gpt-5-search-api",
+}
+
 type ConversationState struct {
 	Text           string
 	ConversationID string
@@ -38,6 +50,9 @@ func ChatCompletion(ctx context.Context, streamer ConversationStreamer, accessTo
 	if err != nil {
 		return nil, err
 	}
+	if IsWebSearchChatRequest(body) && !HasUnsupportedTools(body, allowedWebSearchTools()) {
+		return SearchChatCompletion(ctx, streamer, accessToken, model, messages)
+	}
 	return cachedTextChatCompletion(ctx, body, messages, func() (map[string]any, error) {
 		text, err := CollectText(ctx, streamer, accessToken, model, messages)
 		if err != nil {
@@ -52,8 +67,58 @@ func StreamChatCompletion(ctx context.Context, streamer ConversationStreamer, ac
 	if err != nil {
 		return nil, nil, err
 	}
+	if IsWebSearchChatRequest(body) && !HasUnsupportedTools(body, allowedWebSearchTools()) {
+		chunks, errCh := StreamWebSearchChatCompletion(ctx, streamer, accessToken, model, messages)
+		return chunks, errCh, nil
+	}
 	chunks, errCh := StreamTextChatCompletion(ctx, streamer, accessToken, model, messages)
 	return chunks, errCh, nil
+}
+
+func SearchChatCompletion(ctx context.Context, streamer ConversationStreamer, accessToken, model string, messages []map[string]any) (map[string]any, error) {
+	result, err := RunSearch(ctx, streamer, accessToken, model, messages)
+	if err != nil {
+		return nil, err
+	}
+	text, annotations := SearchTextWithCitations(result)
+	return CompletionResponseWithAnnotations(model, text, messages, chatCompletionAnnotations(annotations)), nil
+}
+
+func StreamWebSearchChatCompletion(ctx context.Context, streamer ConversationStreamer, accessToken, model string, messages []map[string]any) (<-chan map[string]any, <-chan error) {
+	out := make(chan map[string]any)
+	errOut := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errOut)
+		result, err := RunSearch(ctx, streamer, accessToken, model, messages)
+		if err != nil {
+			errOut <- err
+			return
+		}
+		text, _ := SearchTextWithCitations(result)
+		id := "chatcmpl-" + newHex(32)
+		created := time.Now().Unix()
+		out <- CompletionChunk(model, map[string]any{"role": "assistant", "content": text}, nil, id, created)
+		out <- CompletionChunk(model, map[string]any{}, "stop", id, created)
+		errOut <- nil
+	}()
+	return out, errOut
+}
+
+func RunSearch(ctx context.Context, streamer ConversationStreamer, accessToken, model string, messages []map[string]any) (map[string]any, error) {
+	searcher, ok := streamer.(Searcher)
+	if !ok {
+		return nil, fmt.Errorf("search upstream is not configured")
+	}
+	prompt := SearchPromptFromMessages(messages)
+	if prompt == "" {
+		return nil, fmt.Errorf("search prompt is required")
+	}
+	searchModel := model
+	if !IsSearchModel(searchModel) {
+		searchModel = SearchModel
+	}
+	return searcher.Search(ctx, accessToken, prompt, searchModel)
 }
 
 func StreamTextChatCompletion(ctx context.Context, streamer ConversationStreamer, accessToken, model string, messages []map[string]any) (<-chan map[string]any, <-chan error) {
@@ -103,17 +168,7 @@ func StreamTextDeltas(ctx context.Context, streamer ConversationStreamer, access
 		defer close(out)
 		defer close(errOut)
 		if IsSearchModel(model) {
-			searcher, ok := streamer.(Searcher)
-			if !ok {
-				errOut <- fmt.Errorf("search upstream is not configured")
-				return
-			}
-			prompt := SearchPromptFromMessages(messages)
-			if prompt == "" {
-				errOut <- fmt.Errorf("search prompt is required")
-				return
-			}
-			result, err := searcher.Search(ctx, accessToken, prompt, model)
+			result, err := RunSearch(ctx, streamer, accessToken, model, messages)
 			if err != nil {
 				errOut <- err
 				return
@@ -168,6 +223,75 @@ func IsSearchModel(model string) bool {
 	return strings.EqualFold(strings.TrimSpace(model), SearchModel)
 }
 
+func IsWebSearchChatRequest(body map[string]any) bool {
+	model := strings.TrimSpace(clean(body["model"]))
+	if IsSearchModel(model) || HasWebSearchTool(body) {
+		return true
+	}
+	if _, ok := body["web_search_options"].(map[string]any); ok {
+		return true
+	}
+	for _, prefix := range searchChatModelPrefixes {
+		if model == prefix || strings.HasPrefix(model, prefix+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+func HasWebSearchTool(body map[string]any) bool {
+	for _, raw := range anyList(body["tools"]) {
+		if _, ok := webSearchToolTypes[toolType(raw)]; ok {
+			return true
+		}
+	}
+	if _, ok := webSearchToolTypes[toolType(body["tool_choice"])]; ok {
+		return true
+	}
+	return false
+}
+
+func HasUnsupportedTools(body map[string]any, allowed map[string]struct{}) bool {
+	tools := anyList(body["tools"])
+	if len(tools) == 0 {
+		return false
+	}
+	for _, raw := range tools {
+		item := asMap(raw)
+		if len(item) == 0 {
+			continue
+		}
+		if _, ok := allowed[toolType(item)]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+func allowedWebSearchTools(extra ...string) map[string]struct{} {
+	allowed := map[string]struct{}{}
+	for key := range webSearchToolTypes {
+		allowed[key] = struct{}{}
+	}
+	for _, key := range extra {
+		if key = strings.TrimSpace(key); key != "" {
+			allowed[key] = struct{}{}
+		}
+	}
+	return allowed
+}
+
+func toolType(value any) string {
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	item := asMap(value)
+	if len(item) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(clean(item["type"]))
+}
+
 func SearchPromptFromMessages(messages []map[string]any) string {
 	fallback := ""
 	for index := len(messages) - 1; index >= 0; index-- {
@@ -200,6 +324,112 @@ func SearchAnswer(result map[string]any) string {
 		return ""
 	}
 	return clean(result["answer"])
+}
+
+func SearchTextWithCitations(result map[string]any) (string, []map[string]any) {
+	text := strings.TrimSpace(SearchAnswer(result))
+	sources := NormalizedSearchSources(result)
+	annotations := make([]map[string]any, 0, len(sources))
+	if len(sources) == 0 {
+		return text, annotations
+	}
+	if text != "" {
+		text += "\n\n"
+	}
+	text += "Sources:\n"
+	for index, source := range sources {
+		title := firstNonEmpty(source["title"], source["url"])
+		text += fmt.Sprintf("%d. %s", index+1, title)
+		if source["url"] != "" {
+			if source["title"] != "" {
+				text += " - "
+			}
+			start := len(text)
+			text += source["url"]
+			annotations = append(annotations, map[string]any{
+				"type":        "url_citation",
+				"start_index": start,
+				"end_index":   len(text),
+				"url":         source["url"],
+				"title":       title,
+			})
+		}
+		text += "\n"
+	}
+	return strings.TrimSpace(text), annotations
+}
+
+func NormalizedSearchSources(result map[string]any) []map[string]string {
+	if result == nil {
+		return nil
+	}
+	out := []map[string]string{}
+	seen := map[string]struct{}{}
+	for _, item := range searchSourceItems(result["sources"]) {
+		url := strings.TrimSpace(item["url"])
+		if url == "" {
+			continue
+		}
+		if _, ok := seen[url]; ok {
+			continue
+		}
+		seen[url] = struct{}{}
+		out = append(out, map[string]string{
+			"title":   strings.TrimSpace(item["title"]),
+			"url":     url,
+			"snippet": strings.TrimSpace(item["snippet"]),
+		})
+	}
+	return out
+}
+
+func searchSourceItems(value any) []map[string]string {
+	switch sources := value.(type) {
+	case []map[string]string:
+		return sources
+	case []map[string]any:
+		out := make([]map[string]string, 0, len(sources))
+		for _, item := range sources {
+			out = append(out, map[string]string{
+				"title":   clean(item["title"]),
+				"url":     clean(item["url"]),
+				"snippet": clean(item["snippet"]),
+			})
+		}
+		return out
+	case []any:
+		out := make([]map[string]string, 0, len(sources))
+		for _, raw := range sources {
+			item := asMap(raw)
+			out = append(out, map[string]string{
+				"title":   clean(item["title"]),
+				"url":     clean(item["url"]),
+				"snippet": clean(item["snippet"]),
+			})
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func chatCompletionAnnotations(annotations []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(annotations))
+	for _, item := range annotations {
+		if clean(item["type"]) != "url_citation" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"type": "url_citation",
+			"url_citation": map[string]any{
+				"start_index": item["start_index"],
+				"end_index":   item["end_index"],
+				"url":         item["url"],
+				"title":       item["title"],
+			},
+		})
+	}
+	return out
 }
 
 func ChatMessagesFromBody(body map[string]any) ([]map[string]any, error) {
@@ -754,8 +984,16 @@ func CompletionChunk(model string, delta map[string]any, finishReason any, compl
 }
 
 func CompletionResponse(model, content string, messages []map[string]any) map[string]any {
+	return CompletionResponseWithAnnotations(model, content, messages, nil)
+}
+
+func CompletionResponseWithAnnotations(model, content string, messages []map[string]any, annotations []map[string]any) map[string]any {
 	promptTokens := CountMessageTokens(messages, model)
 	completionTokens := CountTextTokens(content, model)
+	message := map[string]any{"role": "assistant", "content": content}
+	if len(annotations) > 0 {
+		message["annotations"] = annotations
+	}
 	return map[string]any{
 		"id":      "chatcmpl-" + newHex(32),
 		"object":  "chat.completion",
@@ -763,7 +1001,7 @@ func CompletionResponse(model, content string, messages []map[string]any) map[st
 		"model":   model,
 		"choices": []map[string]any{{
 			"index":         0,
-			"message":       map[string]any{"role": "assistant", "content": content},
+			"message":       message,
 			"finish_reason": "stop",
 		}},
 		"usage": map[string]any{

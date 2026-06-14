@@ -53,6 +53,43 @@ func Response(body map[string]any, chat ConversationStreamer, image ImageGenerat
 			"usage":      ImageUsage(prompt, len(output)),
 		}, nil
 	}
+	if HasWebSearchTool(body) && !HasUnsupportedTools(body, allowedWebSearchTools("image_generation")) {
+		if chat == nil || accounts == nil {
+			return nil, fmt.Errorf("search upstream is not configured")
+		}
+		messages := responseMessages(body["input"], body["instructions"])
+		if len(messages) == 0 {
+			return nil, fmt.Errorf("input text is required")
+		}
+		token, err := accounts.GetAvailableAccessTokenFor(context.Background(), nil)
+		if err != nil {
+			return nil, err
+		}
+		result, err := RunSearch(context.Background(), chat, token, model, messages)
+		if err != nil {
+			if account.IsInvalidTokenError(err) {
+				accounts.MarkInvalidToken(token)
+			}
+			return nil, err
+		}
+		text, annotations := SearchTextWithCitations(result)
+		searchItem := webSearchCallItem(SearchPromptFromMessages(messages), NormalizedSearchSources(result))
+		messageItem := responseTextOutputItem(text, annotations)
+		return map[string]any{
+			"id":         id,
+			"object":     "response",
+			"created_at": created,
+			"status":     "completed",
+			"error":      nil,
+			"model":      model,
+			"output":     []map[string]any{searchItem, messageItem},
+			"usage": map[string]any{
+				"input_tokens":  CountMessageTokens(messages, model),
+				"output_tokens": CountTextTokens(text, model),
+				"total_tokens":  CountMessageTokens(messages, model) + CountTextTokens(text, model),
+			},
+		}, nil
+	}
 	if chat == nil || accounts == nil {
 		return nil, fmt.Errorf("chat completions upstream is not configured")
 	}
@@ -71,13 +108,7 @@ func Response(body map[string]any, chat ConversationStreamer, image ImageGenerat
 		}
 		return nil, err
 	}
-	output := []map[string]any{{
-		"id":      "msg_" + newHex(32),
-		"type":    "message",
-		"status":  "completed",
-		"role":    "assistant",
-		"content": []map[string]any{{"type": "output_text", "text": text, "annotations": []any{}}},
-	}}
+	output := []map[string]any{responseTextOutputItem(text, nil)}
 	return map[string]any{
 		"id":         id,
 		"object":     "response",
@@ -87,6 +118,39 @@ func Response(body map[string]any, chat ConversationStreamer, image ImageGenerat
 		"model":      model,
 		"output":     output,
 	}, nil
+}
+
+func responseTextOutputItem(text string, annotations []map[string]any) map[string]any {
+	content := map[string]any{"type": "output_text", "text": text, "annotations": annotations}
+	if annotations == nil {
+		content["annotations"] = []any{}
+	}
+	return map[string]any{
+		"id":      "msg_" + newHex(32),
+		"type":    "message",
+		"status":  "completed",
+		"role":    "assistant",
+		"content": []map[string]any{content},
+	}
+}
+
+func webSearchCallItem(query string, sources []map[string]string) map[string]any {
+	action := map[string]any{"type": "search", "query": query, "queries": []string{query}}
+	if len(sources) > 0 {
+		items := make([]map[string]any, 0, len(sources))
+		for _, source := range sources {
+			if source["url"] != "" {
+				items = append(items, map[string]any{"type": "url", "url": source["url"]})
+			}
+		}
+		action["sources"] = items
+	}
+	return map[string]any{
+		"id":     "ws_" + newHex(32),
+		"type":   "web_search_call",
+		"status": "completed",
+		"action": action,
+	}
 }
 
 func AnthropicMessage(body map[string]any, chat ConversationStreamer, accounts ImageAccountPool) (map[string]any, error) {

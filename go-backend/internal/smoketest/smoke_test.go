@@ -120,7 +120,7 @@ func TestLocalGoProcessSmoke(t *testing.T) {
 		t.Fatalf("response api = %#v", respBody)
 	}
 	messageBody := decodeMap(t, requestJSON(t, http.MethodPost, base+"/v1/messages", smokeKey, map[string]any{
-		"model":   "auto",
+		"model":    "auto",
 		"messages": []map[string]any{{"role": "user", "content": "hello"}},
 	}))
 	if messageBody["role"] != "assistant" {
@@ -345,10 +345,12 @@ func startMockUpstream(t *testing.T) (string, func()) {
 		case r.URL.Path == "/backend-api/conversation/init":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"default_model_slug": "gpt-5",
-				"limits_progress": []map[string]any{{"feature_name": "image_gen", "remaining": 10, "reset_after": "2026-06-01T00:00:00Z"}},
+				"limits_progress":    []map[string]any{{"feature_name": "image_gen", "remaining": 10, "reset_after": "2026-06-01T00:00:00Z"}},
 			})
-		case r.URL.Path == "/backend-api/sentinel/chat-requirements":
-			_ = json.NewEncoder(w).Encode(map[string]any{"token": "requirements-token", "turnstile": map[string]any{"required": false}, "proofofwork": map[string]any{"required": false}})
+		case r.URL.Path == "/backend-api/sentinel/chat-requirements/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prepare-token", "turnstile": map[string]any{"required": false}, "proofofwork": map[string]any{"required": false}})
+		case r.URL.Path == "/backend-api/sentinel/chat-requirements/finalize":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "requirements-token"})
 		case r.URL.Path == "/backend-api/conversation":
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = w.Write([]byte(`data: {"message":{"author":{"role":"assistant"},"content":{"parts":["hello"]}}}` + "\n\n"))

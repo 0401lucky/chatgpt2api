@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -629,7 +630,12 @@ func (a *App) handleImageTaskEdits(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	prompt, model, size, _, _, images, err := parseImageEditRequest(r)
+	prompt, model, size, _, _, images, masks, err := parseImageEditRequest(r)
+	if err != nil {
+		writeDetailError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	images, err = compositeEditMasks(images, masks)
 	if err != nil {
 		writeDetailError(w, http.StatusBadRequest, err.Error())
 		return
@@ -689,7 +695,9 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 		body.ResponseFormat = "b64_json"
 	}
 	responseFormat := normalizeImageResponseFormat(body.ResponseFormat)
-	data, errorsOut := a.generateImagesWithPool(r.Context(), body.Prompt, body.Model, body.Size, "b64_json", body.N)
+	requestedCount := body.N
+	attemptCount := a.imageGenerationAttemptCount(requestedCount)
+	data, errorsOut := a.generateImagesWithPool(r.Context(), body.Prompt, body.Model, body.Size, "b64_json", attemptCount)
 	if len(data) == 0 && len(errorsOut) > 0 {
 		err := errorsOut[0]
 		if isNoAvailableImageAccountError(err) {
@@ -708,11 +716,16 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(errorsOut) > 0 {
 		a.logEvent("call", "图片生成部分失败", map[string]any{
-			"model":  body.Model,
-			"size":   body.Size,
-			"count":  len(data),
-			"errors": errorMessages(errorsOut),
+			"model":     body.Model,
+			"size":      body.Size,
+			"count":     len(data),
+			"requested": requestedCount,
+			"attempts":  attemptCount,
+			"errors":    errorMessages(errorsOut),
 		})
+	}
+	if len(data) > requestedCount {
+		data = data[:requestedCount]
 	}
 	data, err := a.local.Images().PrepareResultData(data, resolveBaseURL(a.config.BaseURL, r))
 	if err != nil {
@@ -730,6 +743,24 @@ func (a *App) handleImagesGenerations(w http.ResponseWriter, r *http.Request) {
 		"created": time.Now().Unix(),
 		"data":    imageResponseData(data, responseFormat),
 	})
+}
+
+func (a *App) imageGenerationAttemptCount(requested int) int {
+	if requested < 1 {
+		requested = 1
+	}
+	multiplier := 1.0
+	if a.config != nil && a.config.ImageRedundancyMultiplier >= 1.0 {
+		multiplier = a.config.ImageRedundancyMultiplier
+	}
+	attempts := int(math.Round(float64(requested) * multiplier))
+	if attempts < requested {
+		attempts = requested
+	}
+	if attempts > 8 {
+		attempts = 8
+	}
+	return attempts
 }
 
 type imageGenerationAttempt struct {
@@ -780,7 +811,12 @@ func (a *App) handleImagesEdits(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireIdentity(w, r); !ok {
 		return
 	}
-	prompt, model, size, responseFormat, stream, images, err := parseImageEditRequest(r)
+	prompt, model, size, responseFormat, stream, images, masks, err := parseImageEditRequest(r)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	images, err = compositeEditMasks(images, masks)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return

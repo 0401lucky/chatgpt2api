@@ -1059,6 +1059,40 @@ func TestDirectImageGenerationRunsMultipleImagesInParallel(t *testing.T) {
 	}
 }
 
+func TestDirectImageGenerationUsesRedundancyMultiplier(t *testing.T) {
+	backend := &retryingImageBackend{}
+	app, accounts := newTestAppWithModels(t, backend)
+	app.config.ImageRedundancyMultiplier = 2
+
+	resp := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader([]byte(`{
+		"prompt": "一只小猫",
+		"model": "gpt-image-2",
+		"n": 2,
+		"response_format": "b64_json"
+	}`)))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	app.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	if len(backend.generateTokens) != 4 {
+		t.Fatalf("generate attempts = %d tokens=%#v", len(backend.generateTokens), backend.generateTokens)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	data := body["data"].([]any)
+	if len(data) != 2 {
+		t.Fatalf("response should return requested count only: %#v", data)
+	}
+	items := accounts.ListAccounts()
+	if items[0]["quota"] != 1 {
+		t.Fatalf("quota should include redundant attempts, item = %#v", items[0])
+	}
+}
+
 func TestDirectImageGenerationReturnsPartialSuccess(t *testing.T) {
 	backend := &retryingImageBackend{
 		err: fmt.Errorf("temporary upstream image failure"),

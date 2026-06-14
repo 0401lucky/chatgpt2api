@@ -90,13 +90,22 @@ func TestBootstrapCloudflareChallengeFallsBackToDefaultPOW(t *testing.T) {
 		case "/":
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`<!doctype html><html><body>Cloudflare cf_chl challenge-platform</body></html>`))
-		case "/backend-api/sentinel/chat-requirements":
+		case "/backend-api/sentinel/chat-requirements/prepare":
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
 			if body["p"] == "" {
 				t.Fatalf("missing fallback p body: %#v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prepare-token"})
+		case "/backend-api/sentinel/chat-requirements/finalize":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["prepare_token"] != "prepare-token" {
+				t.Fatalf("prepare token = %#v", body["prepare_token"])
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": "requirements-token"})
 		case "/backend-api/conversation":
@@ -137,13 +146,15 @@ func TestChatRequirementsCloudflareChallengeRetriesWithFreshSession(t *testing.T
 		case "/":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("<html></html>"))
-		case "/backend-api/sentinel/chat-requirements":
+		case "/backend-api/sentinel/chat-requirements/prepare":
 			hit := requirementsHits.Add(1)
 			if hit == 1 {
 				w.WriteHeader(http.StatusForbidden)
 				_, _ = w.Write([]byte(`<!doctype html><html><body>Cloudflare cf_chl challenge-platform</body></html>`))
 				return
 			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prepare-token"})
+		case "/backend-api/sentinel/chat-requirements/finalize":
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": "requirements-token"})
 		case "/backend-api/conversation":
 			if r.Header.Get("OpenAI-Sentinel-Chat-Requirements-Token") != "requirements-token" {
@@ -275,7 +286,7 @@ func TestStreamConversation(t *testing.T) {
 		case "/":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`<html data-build="test-build"><script src="/backend-api/sentinel/sdk.js"></script></html>`))
-		case "/backend-api/sentinel/chat-requirements":
+		case "/backend-api/sentinel/chat-requirements/prepare":
 			if r.Header.Get("Authorization") != "Bearer test-token" {
 				t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
 			}
@@ -285,6 +296,18 @@ func TestStreamConversation(t *testing.T) {
 			}
 			if body["p"] == "" {
 				t.Fatalf("missing p body: %#v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prepare-token"})
+		case "/backend-api/sentinel/chat-requirements/finalize":
+			if r.Header.Get("Authorization") != "Bearer test-token" {
+				t.Fatalf("authorization = %q", r.Header.Get("Authorization"))
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["prepare_token"] != "prepare-token" {
+				t.Fatalf("prepare token = %#v", body["prepare_token"])
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": "requirements-token"})
 		case "/backend-api/conversation":

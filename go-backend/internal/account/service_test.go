@@ -63,6 +63,43 @@ func TestAcquireImageTokenRespectsQuotaAndRelease(t *testing.T) {
 	}
 }
 
+func TestListAccountsIncludesImageInflight(t *testing.T) {
+	service := newTestService(t, 2)
+	service.AddAccounts([]string{"token-alpha-1234567890"})
+	service.UpdateAccount("token-alpha-1234567890", map[string]any{"quota": 2, "status": "正常"})
+
+	_, release, err := service.AcquireImageToken(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := service.ListAccounts()
+	if got := items[0]["image_inflight"]; got != 1 {
+		t.Fatalf("image_inflight = %#v", got)
+	}
+	if got := items[0]["imageInflight"]; got != 1 {
+		t.Fatalf("imageInflight = %#v", got)
+	}
+
+	release()
+	items = service.ListAccounts()
+	if got := items[0]["image_inflight"]; got != 0 {
+		t.Fatalf("image_inflight after release = %#v", got)
+	}
+}
+
+func TestListNormalTokensOnlyReturnsNormalAccounts(t *testing.T) {
+	service := newTestService(t, 2)
+	service.AddAccounts([]string{"token-alpha-1234567890", "token-beta-1234567890", "token-gamma-1234567890"})
+	service.UpdateAccount("token-alpha-1234567890", map[string]any{"status": "正常"})
+	service.UpdateAccount("token-beta-1234567890", map[string]any{"status": "限流"})
+	service.UpdateAccount("token-gamma-1234567890", map[string]any{"status": "异常"})
+
+	tokens := service.ListNormalTokens()
+	if len(tokens) != 1 || tokens[0] != "token-alpha-1234567890" {
+		t.Fatalf("normal tokens = %#v", tokens)
+	}
+}
+
 func TestRefreshWithoutRefresherReturnsSafeErrors(t *testing.T) {
 	service := newTestService(t, 3)
 	const token = "secret-token-alpha-1234567890"

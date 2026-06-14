@@ -145,3 +145,16 @@ func TestResponseDetailSummarizesCloudflareChallenge(t *testing.T) {
 		t.Fatalf("responseDetail = %q, want %q", got, want)
 	}
 }
+
+func TestCloudflareChallengePayloadRecognizesAdditionalMarkers(t *testing.T) {
+	cases := []string{
+		`<title>Attention Required! | Cloudflare</title>`,
+		`<script>window.__cf_chl_opt={}</script>`,
+		`<div id="cf-chl-widget"></div>`,
+	}
+	for _, body := range cases {
+		if !isCloudflareChallengePayload(map[string]any{"body": body}) {
+			t.Fatalf("expected challenge marker in %q", body)
+		}
+	}
+}

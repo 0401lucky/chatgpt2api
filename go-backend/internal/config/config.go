@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -23,6 +24,7 @@ type Config struct {
 	ImagePollTimeoutSecs          int
 	ImagePollInitialWaitSecs      int
 	ImagePollIntervalSecs         int
+	ImageRedundancyMultiplier     float64
 	AutoRemoveInvalidAccounts     bool
 	AutoRemoveRateLimitedAccounts bool
 	BaseURL                       string
@@ -78,6 +80,7 @@ func LoadFrom(projectRoot, configFile string) (*Config, error) {
 		ImagePollTimeoutSecs:          intValue(raw["image_poll_timeout_secs"], 120, 1),
 		ImagePollInitialWaitSecs:      intValue(raw["image_poll_initial_wait_secs"], 10, 0),
 		ImagePollIntervalSecs:         intValue(raw["image_poll_interval_secs"], 10, 1),
+		ImageRedundancyMultiplier:     floatValue(raw["image_redundancy_multiplier"], 1.0, 1.0),
 		AutoRemoveInvalidAccounts:     boolValue(raw["auto_remove_invalid_accounts"], false),
 		AutoRemoveRateLimitedAccounts: boolValue(raw["auto_remove_rate_limited_accounts"], false),
 		BaseURL:                       strings.TrimRight(strings.TrimSpace(envOr("CHATGPT2API_BASE_URL", cleanString(raw["base_url"]))), "/"),
@@ -196,6 +199,7 @@ func (c *Config) publicConfigLocked() map[string]any {
 	data["image_poll_initial_wait_secs"] = c.ImagePollInitialWaitSecs
 	data["image_poll_interval_secs"] = c.ImagePollIntervalSecs
 	data["image_account_concurrency"] = c.ImageAccountConcurrency
+	data["image_redundancy_multiplier"] = c.ImageRedundancyMultiplier
 	data["proxy"] = c.Proxy
 	data["base_url"] = c.BaseURL
 	data["auto_remove_invalid_accounts"] = c.AutoRemoveInvalidAccounts
@@ -223,6 +227,7 @@ func (c *Config) refreshDerivedLocked() {
 	c.ImagePollTimeoutSecs = intValue(c.Raw["image_poll_timeout_secs"], 120, 1)
 	c.ImagePollInitialWaitSecs = intValue(c.Raw["image_poll_initial_wait_secs"], 10, 0)
 	c.ImagePollIntervalSecs = intValue(c.Raw["image_poll_interval_secs"], 10, 1)
+	c.ImageRedundancyMultiplier = floatValue(c.Raw["image_redundancy_multiplier"], 1.0, 1.0)
 	c.AutoRemoveInvalidAccounts = boolValue(c.Raw["auto_remove_invalid_accounts"], false)
 	c.AutoRemoveRateLimitedAccounts = boolValue(c.Raw["auto_remove_rate_limited_accounts"], false)
 	c.BaseURL = strings.TrimRight(strings.TrimSpace(envOr("CHATGPT2API_BASE_URL", cleanString(c.Raw["base_url"]))), "/")
@@ -379,6 +384,40 @@ func intValue(value any, fallback, minimum int) int {
 		_, err := fmt.Sscanf(strings.TrimSpace(v), "%d", &n)
 		if err != nil {
 			n = fallback
+		}
+	default:
+		n = fallback
+	}
+	if n < minimum {
+		return minimum
+	}
+	return n
+}
+
+func floatValue(value any, fallback, minimum float64) float64 {
+	var n float64
+	switch v := value.(type) {
+	case float64:
+		n = v
+	case float32:
+		n = float64(v)
+	case int:
+		n = float64(v)
+	case int64:
+		n = float64(v)
+	case json.Number:
+		parsed, err := v.Float64()
+		if err != nil {
+			n = fallback
+		} else {
+			n = parsed
+		}
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			n = fallback
+		} else {
+			n = parsed
 		}
 	default:
 		n = fallback

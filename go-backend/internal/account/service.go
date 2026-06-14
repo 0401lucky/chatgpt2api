@@ -115,7 +115,7 @@ func (s *Service) SetAutoRemoveOptions(invalidAccounts, rateLimitedAccounts bool
 func (s *Service) ListAccounts() []map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return publicAccounts(s.items)
+	return publicAccountsWithInflight(s.items, s.imageReservations)
 }
 
 func (s *Service) GetAccount(accessToken string) map[string]any {
@@ -137,6 +137,21 @@ func (s *Service) ListTokens() []string {
 	defer s.mu.Unlock()
 	out := make([]string, 0, len(s.items))
 	for _, item := range s.items {
+		if token := clean(item["access_token"]); token != "" {
+			out = append(out, token)
+		}
+	}
+	return out
+}
+
+func (s *Service) ListNormalTokens() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.items))
+	for _, item := range s.items {
+		if clean(item["status"]) != "正常" {
+			continue
+		}
 		if token := clean(item["access_token"]); token != "" {
 			out = append(out, token)
 		}
@@ -1092,6 +1107,23 @@ func publicAccounts(items []map[string]any) []map[string]any {
 	return out
 }
 
+func publicAccountsWithInflight(items []map[string]any, reservations map[string]int) []map[string]any {
+	inflightByID := map[string]int{}
+	for _, source := range items {
+		token := clean(source["access_token"])
+		if token != "" {
+			inflightByID[AccountID(token)] = max(0, reservations[token])
+		}
+	}
+	out := publicAccounts(items)
+	for _, item := range out {
+		inflight := inflightByID[clean(item["id"])]
+		item["image_inflight"] = inflight
+		item["imageInflight"] = inflight
+	}
+	return out
+}
+
 func publicAccount(item map[string]any) map[string]any {
 	token := clean(item["access_token"])
 	if token == "" {
@@ -1118,6 +1150,8 @@ func publicAccount(item map[string]any) map[string]any {
 		"expires_at":          nullable(item["expires_at"]),
 		"success":             intValue(item["success"], 0),
 		"fail":                intValue(item["fail"], 0),
+		"image_inflight":      0,
+		"imageInflight":       0,
 		"last_used_at":        nullable(item["last_used_at"]),
 		"lastUsedAt":          nullable(item["last_used_at"]),
 	}

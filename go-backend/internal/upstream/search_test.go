@@ -31,7 +31,9 @@ func TestSearchUsesPreparedSearchConversationAndPollsResult(t *testing.T) {
 				t.Fatalf("prepare hints = %#v", body["system_hints"])
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"conduit_token": "conduit-token"})
-		case "/backend-api/sentinel/chat-requirements":
+		case "/backend-api/sentinel/chat-requirements/prepare":
+			_ = json.NewEncoder(w).Encode(map[string]any{"prepare_token": "prepare-token"})
+		case "/backend-api/sentinel/chat-requirements/finalize":
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": "requirements-token"})
 		case "/backend-api/f/conversation":
 			if r.Header.Get("X-Conduit-Token") != "conduit-token" {
